@@ -19,13 +19,12 @@ import numpy as np
 import pandas as pd
 import scipy.io
 
-from main import (
+from constants import (
     CONTEXT_SIZE_SECONDS,
     MAX_METADATA_WINDOWS_NICU,
     MAX_METADATA_WINDOWS_NON_NICU,
     OVERLAP_PERCENTAGE_NICU,
-    OVERLAP_PERCENTAGE_NON_NICU,
-    WINDOW_METADATA_PATH,
+    OVERLAP_PERCENTAGE_NON_NICU
 )
 
 
@@ -161,8 +160,5 @@ def generate_all_window_metadata(nicu_files, non_nicu_files):
     print(f"  Non-NICU: {len(metadata_df[metadata_df['baby_type'] == 'NON_NICU'])}")
     print(f"  NICU: {len(metadata_df[metadata_df['baby_type'] == 'NICU'])}")
     print(f"{'=' * 80}\n")
-
-    metadata_df.to_pickle(WINDOW_METADATA_PATH)
-    print(f"✓ Saved: {WINDOW_METADATA_PATH}\n")
 
     return metadata_df

@@ -21,14 +21,12 @@ windows_to_embed.pkl                —  unique windows only (for Step 3)
 import numpy as np
 import pandas as pd
 
-from main import (
+from constants import (
     NICU_LATE_WINDOW_BIAS,
     NUM_SAMPLE_WINDOWS_NICU,
     NUM_SAMPLE_WINDOWS_NON_NICU,
-    SAMPLED_WINDOWS_ALL_THRESHOLDS_PATH,
     THRESHOLDS_DAYS,
-    THRESHOLDS_SECONDS,
-    WINDOWS_TO_EMBED_PATH,
+    THRESHOLDS_SECONDS
 )
 
 
@@ -194,13 +192,9 @@ def assign_labels_for_all_thresholds(sampled_windows_df):
 
     # Stack all thresholds — same windows repeated with different labels
     all_labeled_df = pd.concat(all_labeled_data, ignore_index=False)
-    all_labeled_df.to_pickle(SAMPLED_WINDOWS_ALL_THRESHOLDS_PATH)
-    print(f"✓ Saved: {SAMPLED_WINDOWS_ALL_THRESHOLDS_PATH}")
 
     # Step 3 only needs unique windows (labels don't affect the embedding)
     unique_windows_df = sampled_windows_df.copy()
-    unique_windows_df.to_pickle(WINDOWS_TO_EMBED_PATH)
-    print(f"✓ Saved: {WINDOWS_TO_EMBED_PATH}")
 
     print(f"\n{'=' * 80}")
     print(f"✓ Total labeled entries: {len(all_labeled_df)}")

@@ -19,23 +19,189 @@ the same embedding is reused across all thresholds.
 
 import os
 import pickle as pl
-
+from pathlib import Path
+import numpy as np
 import pandas as pd
 from chronos import Chronos2Pipeline
 import torch
 
-from main import (
+from constants import (
     CONTEXT_SIZE_SECONDS,
-    EMBEDDINGS_CACHE_PATH,
-    MISSING_WINDOWS_PATH,
-    SAMPLED_WINDOWS_ALL_THRESHOLDS_PATH,
-    WINDOW_SIZE_SECONDS,
-    create_window_key,
-    create_windowed_features,
-    get_embedding,
-    load_pickle,
-    save_pickle,
+    WINDOW_SIZE_SECONDS
 )
+
+
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+DATA_DIR = (BASE_DIR / "data").resolve()
+MISSING_WINDOWS_PATH = (DATA_DIR / 'windows_missing_embeddings.pkl').resolve()
+EMBEDDINGS_CACHE_PATH = (DATA_DIR / 'embeddings_global.pkl').resolve()
+
+
+
+def prepare_chronos_input(hr_windows, spo2_windows):
+    """Format HR + SpO2 sub-window arrays as Chronos-2 model input.
+
+    - NaN bins are filled with the channel mean (or 0 if all NaN).
+    - Returns a (2, 1, num_sub_windows) tensor: channel 0 = HR, channel 1 = SpO2.
+    """
+    hr_clean = np.where(
+        np.isnan(hr_windows),
+        np.nanmean(hr_windows) if not np.all(np.isnan(hr_windows)) else 0,
+        hr_windows,
+    ).astype(np.float32)
+
+    spo2_clean = np.where(
+        np.isnan(spo2_windows),
+        np.nanmean(spo2_windows) if not np.all(np.isnan(spo2_windows)) else 0,
+        spo2_windows,
+    ).astype(np.float32)
+
+    hr_tensor = torch.tensor(hr_clean, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+    spo2_tensor = torch.tensor(spo2_clean, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+    return torch.cat([hr_tensor, spo2_tensor], dim=0)
+
+
+def get_chronos_embedding(chronos_input, pipeline):
+    """Run Chronos-2 embed() and concatenate the last-token HR + SpO2 embeddings."""
+    with torch.no_grad():
+        embeddings, _ = pipeline.embed(chronos_input)
+
+    # Take the final time-step embedding from each channel
+    hr_emb = embeddings[0][0][-1].float()
+    spo2_emb = embeddings[1][0][-1].float()
+    return torch.cat([hr_emb, spo2_emb], dim=0).cpu().numpy()
+
+
+def get_embedding(hr_windows, spo2_windows, pipeline):
+    """End-to-end: sub-window arrays → Chronos input → concatenated embedding vector."""
+    chronos_input = prepare_chronos_input(hr_windows, spo2_windows)
+    return get_chronos_embedding(chronos_input, pipeline)
+
+def extract_raw_timeseries(mat_file_path, start_time, context_size):
+    """Load HR and SpO2 samples from a .mat file within [start, start + context).
+
+    Args:
+        mat_file_path: Path to the baby's vital-sign .mat file.
+        start_time: Absolute window start (seconds, same units as vt).
+        context_size: Window length in seconds (typically CONTEXT_SIZE_SECONDS).
+
+    Returns:
+        Dict with filtered timestamps, HR, SpO2 arrays — or None if no valid data.
+    """
+    try:
+        mat_data = scipy.io.loadmat(mat_file_path)
+    except Exception as e:
+        print(f"Error loading {mat_file_path}: {e}")
+        return None
+
+    birth_time = mat_data['pdata'][0][1]
+    age_at_death = mat_data['pdata'][0][-1]
+    death_ts = age_at_death * 86400 if not np.isnan(age_at_death) else None
+
+    # vdata columns: 0 = heart rate, 2 = SpO2 (column 1 is unused here)
+    hr_cols = mat_data['vdata'][:, 0]
+    spo2_cols = mat_data['vdata'][:, 2]
+    timestamps = mat_data['vt'].flatten()
+
+    end_time = start_time + context_size
+    time_mask = (timestamps >= start_time) & (timestamps < end_time)
+    valid_mask = ~np.isnan(hr_cols) & ~np.isnan(spo2_cols)
+    final_mask = time_mask & valid_mask
+
+    timestamps_valid = timestamps[final_mask]
+    hr_valid = hr_cols[final_mask]
+    spo2_valid = spo2_cols[final_mask]
+
+    if len(timestamps_valid) == 0:
+        return None
+
+    return {
+        'timestamps': timestamps_valid,
+        'hr_raw': hr_valid,
+        'spo2_raw': spo2_valid,
+        'birth_time': birth_time,
+        'death_ts': death_ts,
+        'start_time': start_time,
+        'context_size': context_size,
+    }
+
+
+def create_windowed_features_from_raw(raw_data, window_size):
+    """Aggregate raw samples into fixed-length sub-window averages for Chronos.
+
+    Divides the 80-hour context into NUM_WINDOWS bins (default 960 × 5 min).
+    Each bin gets the mean HR and mean SpO2 of all samples falling in it.
+    Bins with no samples remain NaN (filled later in prepare_chronos_input).
+    """
+    timestamps = raw_data['timestamps']
+    hr_raw = raw_data['hr_raw']
+    spo2_raw = raw_data['spo2_raw']
+    start_time = raw_data['start_time']
+    context_size = raw_data['context_size']
+
+    # Assign each sample to a sub-window index (0, 1, 2, …)
+    window_indices = np.floor((timestamps - start_time) / window_size).astype(int)
+    num_windows = int(np.ceil(context_size / window_size))
+
+    hr_windows = np.full(num_windows, np.nan)
+    spo2_windows = np.full(num_windows, np.nan)
+
+    for idx in range(num_windows):
+        mask = window_indices == idx
+        if np.any(mask):
+            hr_windows[idx] = np.mean(hr_raw[mask])
+            spo2_windows[idx] = np.mean(spo2_raw[mask])
+
+    return hr_windows, spo2_windows
+
+
+def create_windowed_features(mat_file_path, start_time, context_size, window_size):
+    """Load .mat file and return (hr_windows, spo2_windows) sub-window arrays."""
+    raw_data = extract_raw_timeseries(mat_file_path, start_time, context_size)
+    if raw_data is None:
+        return None
+    return create_windowed_features_from_raw(raw_data, window_size)
+
+
+def create_window_key(mat_file, window_start, window_end):
+    """Unique cache key for one window: baby_id + start + end timestamps."""
+    baby_id = mat_file.split('/')[-1].replace('.mat', '')
+    return f"{baby_id}_{int(window_start)}_{int(window_end)}"
+
+
+def ensure_numpy_pickle_compat():
+    """Allow unpickling arrays saved with NumPy 2.x when running NumPy 1.x.
+
+    NumPy 2.x renamed the internal module from numpy.core to numpy._core.
+    Pickle files store the module path, so loading a 2.x pickle on 1.x fails
+    unless we alias the old module names.
+    """
+    import sys
+
+    try:
+        import numpy._core  # noqa: F401  — already on NumPy 2.x, nothing to do
+    except ModuleNotFoundError:
+        import numpy.core as _core
+
+        sys.modules.setdefault('numpy._core', _core)
+        sys.modules.setdefault('numpy._core.multiarray', _core.multiarray)
+        sys.modules.setdefault('numpy._core.umath', _core.umath)
+
+
+
+def load_pickle(path):
+    ensure_numpy_pickle_compat()
+    with open(path, 'rb') as f:
+        return pl.load(f)
+
+
+def save_pickle(obj, path):
+    """Atomic write: save to .tmp first, then rename (avoids corrupt partial files)."""
+    tmp_path = f'{path}.tmp'
+    with open(tmp_path, 'wb') as f:
+        pl.dump(obj, f)
+    os.replace(tmp_path, path)
 
 
 def load_embeddings_cache():
@@ -189,7 +355,7 @@ def ensure_embeddings_for_windows(windows_df, save_every=500):
     return cache
 
 
-def prepare_training_data_for_threshold(threshold_days, embeddings_cache=None):
+def prepare_training_data_for_threshold(threshold_days, samples_windows_path, embeddings_cache=None):
     """Join labeled windows with cached embeddings for one threshold (Step 4).
 
     Reads the labeled data from Step 2, filters to one threshold, and
@@ -203,7 +369,7 @@ def prepare_training_data_for_threshold(threshold_days, embeddings_cache=None):
     if embeddings_cache is None:
         embeddings_cache = load_embeddings_cache()
 
-    sampled_all = pd.read_pickle(SAMPLED_WINDOWS_ALL_THRESHOLDS_PATH)
+    sampled_all = pd.read_pickle(samples_windows_path)
     threshold_data = sampled_all[sampled_all['threshold_days'] == threshold_days]
 
     embedding_keys = []
