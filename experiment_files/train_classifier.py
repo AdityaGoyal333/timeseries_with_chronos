@@ -1,4 +1,21 @@
-"""Step 5: Train binary classifier on Chronos embeddings with k-fold CV."""
+"""Step 5: Train binary classifier on Chronos embeddings with k-fold CV.
+
+Pipeline role
+-------------
+Chronos embeddings are frozen (not fine-tuned). We train a small MLP head
+on top to predict death-proximity (label 1) vs not (label 0).
+
+Evaluation
+----------
+Stratified k-fold cross-validation preserves class balance in each fold.
+Metrics: accuracy, precision, recall, F1, ROC-AUC.
+Loss curves, PR curves, and ROC curves are saved per fold.
+
+Outputs
+-------
+results_{N}d_focal.pkl          —  avg/std metrics + per-fold details
+training_curves_{N}d_focal/     —  PNG plots for each fold
+"""
 
 import os
 import pickle as pl
@@ -24,7 +41,10 @@ from torchvision.ops import sigmoid_focal_loss
 
 
 class EmbeddingDataset(Dataset):
+    """PyTorch Dataset wrapping precomputed Chronos embedding vectors."""
+
     def __init__(self, embeddings, labels):
+        # Pre-convert to tensors once (avoids repeated conversion in __getitem__)
         self.embeddings = [torch.FloatTensor(e) for e in embeddings]
         self.labels = torch.FloatTensor(labels)
 
@@ -36,6 +56,12 @@ class EmbeddingDataset(Dataset):
 
 
 class Classifier(nn.Module):
+    """Simple 3-layer MLP head on top of frozen Chronos embeddings.
+
+    Architecture: dim → 512 → 256 → 1 (single logit for binary classification)
+    Output is a raw logit; apply sigmoid for probability.
+    """
+
     def __init__(self, dim, hidden=512):
         super().__init__()
         self.net = nn.Sequential(
@@ -47,16 +73,21 @@ class Classifier(nn.Module):
         )
 
     def forward(self, x):
+        # Flatten in case embedding has extra dimensions
         return self.net(x.view(x.size(0), -1)).squeeze()
 
 
 def _batch_loss(logits, labels, use_focal_loss, alpha, gamma):
+    """Compute loss for one batch — focal loss or standard BCE."""
     if use_focal_loss:
+        # Focal loss down-weights easy examples, focuses on hard positives
         return sigmoid_focal_loss(logits, labels, alpha=alpha, gamma=gamma, reduction='mean')
+    # BCEWithLogitsLoss = sigmoid + binary cross-entropy in one stable op
     return nn.BCEWithLogitsLoss()(logits, labels)
 
 
 def compute_loader_loss(model, loader, device, use_focal_loss, alpha, gamma):
+    """Average loss over all batches in a DataLoader (used for val loss tracking)."""
     model.eval()
     total_loss = 0.0
     with torch.no_grad():
@@ -68,6 +99,7 @@ def compute_loader_loss(model, loader, device, use_focal_loss, alpha, gamma):
 
 
 def train_epoch(model, loader, optimizer, device, use_focal_loss, alpha, gamma, verbose=False):
+    """Run one training epoch; return mean loss over all batches."""
     model.train()
     total_loss = 0.0
     label_0_losses = []
@@ -79,6 +111,7 @@ def train_epoch(model, loader, optimizer, device, use_focal_loss, alpha, gamma, 
         logits = model(embs)
 
         if use_focal_loss:
+            # Per-sample loss (reduction='none') for optional class-wise logging
             loss_per_sample = sigmoid_focal_loss(
                 logits, labels, alpha=alpha, gamma=gamma, reduction='none'
             )
@@ -106,6 +139,7 @@ def train_epoch(model, loader, optimizer, device, use_focal_loss, alpha, gamma, 
 
 
 def validate(model, loader, device):
+    """Evaluate model on a held-out set; return metrics dict."""
     model.eval()
     preds, lbls, probs = [], [], []
 
@@ -114,7 +148,7 @@ def validate(model, loader, device):
             embs, labels = embs.to(device), labels.to(device)
             logits = model(embs)
             probs_batch = torch.sigmoid(logits).cpu().numpy()
-            preds_batch = (probs_batch > 0.5).astype(int)
+            preds_batch = (probs_batch > 0.5).astype(int)  # default 0.5 threshold
             probs.extend(probs_batch)
             preds.extend(preds_batch)
             lbls.extend(labels.cpu().numpy())
@@ -128,6 +162,7 @@ def validate(model, loader, device):
         'precision': precision_score(lbls, preds, zero_division=0),
         'recall': recall_score(lbls, preds, zero_division=0),
         'f1': f1_score(lbls, preds, zero_division=0),
+        # AUC undefined if val fold has only one class (can happen with small k)
         'auc': roc_auc_score(lbls, probs) if len(set(lbls)) > 1 else 0.0,
         'labels': lbls,
         'probs': probs,
@@ -135,6 +170,7 @@ def validate(model, loader, device):
 
 
 def _save_loss_curve(train_losses, val_losses, path):
+    """Plot train vs val loss over epochs for one fold."""
     epochs = np.arange(1, len(train_losses) + 1)
     plt.figure(figsize=(8, 5))
     plt.plot(epochs, train_losses, label='Train loss', marker='o', markersize=3)
@@ -150,6 +186,7 @@ def _save_loss_curve(train_losses, val_losses, path):
 
 
 def _save_pr_curve(labels, probs, path):
+    """Plot precision-recall curve; return curve data for pickle storage."""
     precision, recall, thresholds = precision_recall_curve(labels, probs)
     ap = average_precision_score(labels, probs) if len(set(labels)) > 1 else 0.0
 
@@ -173,6 +210,7 @@ def _save_pr_curve(labels, probs, path):
 
 
 def _save_roc_curve(labels, probs, path):
+    """Plot ROC curve; handle single-class folds gracefully."""
     if len(set(labels)) < 2:
         plt.figure(figsize=(6, 5))
         plt.text(0.5, 0.5, 'ROC undefined\n(single class in val fold)', ha='center', va='center')
@@ -213,6 +251,11 @@ def k_fold_cv(
     gamma,
     output_dir=None,
 ):
+    """Run stratified k-fold CV; return average metrics and per-fold details.
+
+    A fresh model is trained from scratch in each fold (no weight sharing).
+    StratifiedKFold ensures each fold has roughly the same class ratio.
+    """
     if len(embeddings) == 0:
         print("No embeddings to train on!")
         return None, None, None, None
@@ -224,6 +267,8 @@ def k_fold_cv(
     labels = np.array(labels)
     dim = embeddings[0].flatten().shape[0]
 
+    # Auto-set focal-loss alpha from class frequency if not provided
+    # alpha = fraction of negatives → balances positive/negative contribution
     if use_focal_loss and alpha is None:
         n_neg = (labels == 0).sum()
         alpha = n_neg / len(labels)
@@ -254,6 +299,7 @@ def k_fold_cv(
             batch_size=batch_size,
         )
 
+        # New model + optimizer for each fold (standard CV practice)
         model = Classifier(dim).to(device)
         optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
@@ -322,6 +368,7 @@ def train_and_save_results(
     lr=0.001,
     device='cpu',
 ):
+    """Train classifier for one threshold and persist results + curve plots."""
     print("\n" + "=" * 100)
     print(f"{' ' * 30}THRESHOLD: {threshold_days} DAYS ({loss_name})")
     print("=" * 100)
@@ -336,6 +383,7 @@ def train_and_save_results(
         output_dir=output_dir,
     )
 
+    # Save everything needed to reproduce / compare results later
     filename = f'results_{threshold_days}d_{suffix}.pkl'
     with open(filename, 'wb') as f:
         pl.dump({
