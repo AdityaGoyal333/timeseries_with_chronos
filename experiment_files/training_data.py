@@ -24,6 +24,7 @@ import numpy as np
 import pandas as pd
 from chronos import Chronos2Pipeline
 import torch
+import scipy.io
 
 from constants import (
     CONTEXT_SIZE_SECONDS,
@@ -95,13 +96,18 @@ def extract_raw_timeseries(mat_file_path, start_time, context_size):
         print(f"Error loading {mat_file_path}: {e}")
         return None
 
-    birth_time = mat_data['pdata'][0][1]
-    age_at_death = mat_data['pdata'][0][-1]
-    death_ts = age_at_death * 86400 if not np.isnan(age_at_death) else None
+
+    # ((birth_time+age_at_death)*86400 - vt)/86400 < threshold_days
+
+    birth_time = mat_data['pdata'][0][1]  # in days realtive to the global start time
+    age_at_death = mat_data['pdata'][0][-1]  # the age in days at death
+    death_ts = age_at_death * 86400 if not np.isnan(age_at_death) else None  # seconds since birth; None if alive  
 
     # vdata columns: 0 = heart rate, 2 = SpO2 (column 1 is unused here)
     hr_cols = mat_data['vdata'][:, 0]
     spo2_cols = mat_data['vdata'][:, 2]
+
+    # vdata is seconds from birth time, not accounting the time of birth 
     timestamps = mat_data['vt'].flatten()
 
     end_time = start_time + context_size

@@ -17,15 +17,19 @@ Run directly:
 
 import os
 import pickle as pl
+import shutil
 import pandas as pd
 from pathlib import Path
 
 
 # Lazy imports so constants/helpers are available without circular deps
-from .sampling import sample_and_label_all_thresholds
-from .train_classifier import train_and_save_results
-from .training_data import ensure_embeddings_for_windows, prepare_training_data_for_threshold
-from .window_metadata import generate_all_window_metadata
+from sampling import sample_and_label_all_thresholds
+from train_classifier import train_and_save_results
+from training_data import ensure_embeddings_for_windows, prepare_training_data_for_threshold
+from window_metadata import generate_all_window_metadata
+from constants import (
+    THRESHOLDS_DAYS
+)
 
 
 # Pre-built list of valid babies (NICU vs Non-NICU classification)
@@ -48,7 +52,6 @@ WINDOW_METADATA_PATH = (DATA_DIR / 'window_metadata.pkl').resolve()
 WINDOWS_TO_EMBED_PATH = (DATA_DIR / 'windows_to_embed.pkl').resolve()
 SAMPLED_WINDOWS_ALL_THRESHOLDS_PATH = (DATA_DIR / 'sampled_windows_all_thresholds.pkl').resolve()
 
-
 # =============================================================================
 # Pipeline orchestrator
 # =============================================================================
@@ -69,6 +72,11 @@ def run_complete_pipeline(use_focal_loss, gamma):
     print("\n" + "=" * 100)
     print(" " * 15 + f"MORTALITY PREDICTION PIPELINE WITH {loss_name.upper()}")
     print("=" * 100 + "\n")
+
+
+
+
+
 
     # --- Discover which .mat files belong to NICU vs Non-NICU babies ---
     with open(VALID_SUMMARY_PATH, 'rb') as f:
@@ -102,6 +110,9 @@ def run_complete_pipeline(use_focal_loss, gamma):
     print(f"⚠ {len(in_summary_not_local)} babies are in valid summary dic but have no local .mat file")
 
 
+
+
+
     # --- Step 1: window metadata ---
     if os.path.exists(WINDOW_METADATA_PATH):
         metadata_df = pd.read_pickle(WINDOW_METADATA_PATH)
@@ -112,8 +123,6 @@ def run_complete_pipeline(use_focal_loss, gamma):
         print(f"✓ Saved: {WINDOW_METADATA_PATH}\n")
 
 
-    exit(0)
-
 
 
     # --- Step 2: sample windows + assign labels ---
@@ -121,6 +130,9 @@ def run_complete_pipeline(use_focal_loss, gamma):
         unique_windows_df = pd.read_pickle(WINDOWS_TO_EMBED_PATH)
         print(f"✓ Loaded sampled windows: {len(unique_windows_df)}\n")
     else:
+
+        # all_labelled_df contains the sampled window metadata with labels for all thresholds
+        # unique_windows_df contains the sampled window metadata with no labels (for embedding)
         all_labeled_df, unique_windows_df = sample_and_label_all_thresholds(metadata_df)
         unique_windows_df.to_pickle(WINDOWS_TO_EMBED_PATH)
         print(f"✓ Saved: {WINDOWS_TO_EMBED_PATH}")
@@ -128,8 +140,11 @@ def run_complete_pipeline(use_focal_loss, gamma):
         all_labeled_df.to_pickle(SAMPLED_WINDOWS_ALL_THRESHOLDS_PATH)
         print(f"✓ Saved: {SAMPLED_WINDOWS_ALL_THRESHOLDS_PATH}")
 
+
+
     # --- Step 3: embed unique windows (incremental cache) ---
     embeddings_cache = ensure_embeddings_for_windows(unique_windows_df)
+
 
     # --- Steps 4 + 5: for each threshold, prepare data and train classifier ---
     for threshold_days in THRESHOLDS_DAYS:
@@ -144,10 +159,28 @@ def run_complete_pipeline(use_focal_loss, gamma):
             loss_name=loss_name,
         )
 
+        exit(0)
+
     print("\n" + "=" * 100)
     print(" " * 30 + "✓ PIPELINE COMPLETE")
     print("=" * 100 + "\n")
 
 
+
+
 if __name__ == "__main__":
     run_complete_pipeline(use_focal_loss=True, gamma=2.0)
+
+
+
+# ways to valdiate training data preparation 
+# compare the implementation with prev chronos files 
+
+
+
+# thigns to imrpvoe 
+# - the roc , pr curve 
+# - see if we can integrate metadata
+# - see if we can simplify the code 
+# - solve the aprt where the nan is getting filled with mean
+# - losses curves in terms of focal loss 

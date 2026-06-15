@@ -83,6 +83,8 @@ def generate_window_metadata_for_baby(mat_file_path, overlap_percentage, max_win
         # (preserves coverage of early AND late parts of the timeline)
         indices = np.linspace(0, num_possible_windows - 1, max_windows, dtype=int)
 
+
+    # ToDo: can we parallelize this loop? It's not a huge bottleneck but it might speed up Step 1
     for idx in indices:
         window_start = birth_time + idx * step_size
         window_end = window_start + CONTEXT_SIZE_SECONDS

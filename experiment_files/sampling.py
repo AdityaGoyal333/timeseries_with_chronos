@@ -209,3 +209,7 @@ def sample_and_label_all_thresholds(metadata_df):
     """Convenience wrapper: run Step 2 sampling then labeling in one call."""
     sampled_windows_df = sample_windows_once(metadata_df)
     return assign_labels_for_all_thresholds(sampled_windows_df)
+
+
+
+# window_start + window_duration + threshold > absolute_death_time
