@@ -71,7 +71,7 @@ def _batch_loss(logits, labels, use_focal_loss, alpha, gamma):
     return nn.functional.binary_cross_entropy_with_logits(logits, labels)
 
 
-def _run_epoch(model, loader, device, optimizer=None, use_focal_loss=False, alpha=0.25, gamma=2.0):
+def _run_epoch(model, loader, device, optimizer=None, use_focal_loss=False, alpha=None, gamma=None):
     """Train if optimizer is given, else evaluate loss only."""
     training = optimizer is not None
     model.train() if training else model.eval()
@@ -157,7 +157,7 @@ def _save_pr_curve(labels, probs, path):
         precision, recall, _ = precision_recall_curve(labels, probs)
         ap = average_precision_score(labels, probs)
         # Drop sklearn sentinel point (recall=0, precision=1) — it creates a fake vertical cliff
-        precision, recall = precision[1:], recall[1:]
+        # precision, recall = precision[1:], recall[1:]
 
     plt.figure(figsize=(6, 5))
     plt.plot(recall, precision, label=f'Model (AP = {ap:.3f})')

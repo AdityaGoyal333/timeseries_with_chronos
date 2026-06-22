@@ -159,8 +159,6 @@ def run_complete_pipeline(use_focal_loss, gamma):
             loss_name=loss_name,
         )
 
-        exit(0)
-
     print("\n" + "=" * 100)
     print(" " * 30 + "✓ PIPELINE COMPLETE")
     print("=" * 100 + "\n")
