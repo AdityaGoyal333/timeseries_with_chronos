@@ -22,6 +22,9 @@ from sklearn.model_selection import StratifiedKFold
 from torch.utils.data import DataLoader, Dataset
 from torchvision.ops import sigmoid_focal_loss
 
+import math
+from torch.utils.data import Sampler
+
 
 class EmbeddingDataset(Dataset):
     def __init__(self, embedding_matrix, labels):
@@ -53,14 +56,74 @@ class Classifier(nn.Module):
         return self.net(x.view(x.size(0), -1)).squeeze(-1)
 
 
+
+
+class UniformClassBatchSampler(Sampler):
+    def __init__(self, labels, batch_size):
+        self.labels = np.asarray(labels)
+        self.batch_size = batch_size
+
+        self.positive_indices = np.where(self.labels == 1)[0]
+        self.negative_indices = np.where(self.labels == 0)[0]
+
+        self.num_samples = len(self.labels)
+        self.num_batches = math.ceil(
+            self.num_samples / self.batch_size
+        )
+
+    def __iter__(self):
+        positive_indices = self.positive_indices.copy()
+        negative_indices = self.negative_indices.copy()
+
+        np.random.shuffle(positive_indices)
+        np.random.shuffle(negative_indices)
+
+        # Divide positives as uniformly as possible among batches.
+        positive_batches = list(
+            np.array_split(positive_indices, self.num_batches)
+        )
+
+        np.random.shuffle(positive_batches)
+
+        negative_pointer = 0
+
+        for positive_batch in positive_batches:
+            batch = positive_batch.tolist()
+
+            negatives_needed = self.batch_size - len(batch)
+
+            batch.extend(
+                negative_indices[
+                    negative_pointer:
+                    negative_pointer + negatives_needed
+                ].tolist()
+            )
+
+            negative_pointer += negatives_needed
+
+            np.random.shuffle(batch)
+
+            if batch:
+                yield batch
+
+    def __len__(self):
+        return self.num_batches
+
+
+
+
+
+
+
+
+
+
 def _focal_alpha(labels):
     """torchvision focal loss: positives get alpha, negatives get (1 - alpha).
 
     Set alpha = fraction of negatives so the rare positive class is up-weighted.
     """
-    labels = np.asarray(labels)
-    n_neg = (labels == 0).sum()
-    return n_neg / len(labels)
+    return 0.96
 
 
 def _batch_loss(logits, labels, use_focal_loss, alpha, gamma):
@@ -71,15 +134,27 @@ def _batch_loss(logits, labels, use_focal_loss, alpha, gamma):
     return nn.functional.binary_cross_entropy_with_logits(logits, labels)
 
 
-def _run_epoch(model, loader, device, optimizer=None, use_focal_loss=False, alpha=None, gamma=None):
+def _run_epoch(
+    model,
+    loader,
+    device,
+    optimizer=None,
+    use_focal_loss=False,
+    alpha=None,
+    gamma=None,
+    interval_losses=None,
+):
     """Train if optimizer is given, else evaluate loss only."""
     training = optimizer is not None
     model.train() if training else model.eval()
 
     total_loss = 0.0
     total_samples = 0
+
+    interval_loss = 0.0
+
     with torch.set_grad_enabled(training):
-        for embs, labels in loader:
+        for batch_idx, (embs, labels) in enumerate(loader, start=1):
             embs, labels = embs.to(device), labels.to(device)
             batch_size = labels.size(0)
             logits = model(embs)
@@ -93,6 +168,18 @@ def _run_epoch(model, loader, device, optimizer=None, use_focal_loss=False, alph
             # batch loss is mean over samples; multiply back to sum, then divide by total samples
             total_loss += loss.item() * batch_size
             total_samples += batch_size
+
+            if training and interval_losses is not None:
+                interval_loss += loss.item()
+
+                if batch_idx % 5 == 0:
+                    interval_losses.append(interval_loss / 5)
+                    interval_loss = 0.0
+
+    remaining_batches = len(loader) % 5
+
+    if training and interval_losses is not None and remaining_batches > 0:
+        interval_losses.append(interval_loss / remaining_batches)
 
     return total_loss / max(total_samples, 1)
 
@@ -137,6 +224,19 @@ def _save_loss_curve(train_losses, val_losses, val_epochs, path):
     plt.ylabel('Loss')
     plt.title('Training and validation loss')
     plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(path, dpi=150)
+    plt.close()
+
+
+def _save_interval_loss_curve(interval_losses, path):
+    intervals = np.arange(1, len(interval_losses) + 1)
+    plt.figure(figsize=(8, 5))
+    plt.plot(intervals, interval_losses)
+    plt.xlabel('5-batch interval')
+    plt.ylabel('Average loss')
+    plt.title('Training loss averaged every 5 batches')
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.savefig(path, dpi=150)
@@ -251,11 +351,27 @@ def k_fold_cv(
     for fold, (train_idx, val_idx) in enumerate(skf.split(embedding_matrix, labels)):
         print(f'Fold {fold + 1}/{k}...', end=' ')
 
-        train_loader = DataLoader(
-            EmbeddingDataset(embedding_matrix[train_idx], labels[train_idx]),
-            batch_size=batch_size,
-            shuffle=True,
+        train_dataset = EmbeddingDataset(
+            embedding_matrix[train_idx],
+            labels[train_idx],
         )
+
+        batch_sampler = UniformClassBatchSampler(
+            labels=labels[train_idx],
+            batch_size=batch_size,
+        )
+
+        train_loader = DataLoader(
+            train_dataset,
+            batch_sampler=batch_sampler,
+        )
+
+        # train_loader = DataLoader(
+        #     EmbeddingDataset(embedding_matrix[train_idx], labels[train_idx]),
+        #     batch_size=batch_size,
+        #     shuffle=True,
+        # )
+
         val_loader = DataLoader(
             EmbeddingDataset(embedding_matrix[val_idx], labels[val_idx]),
             batch_size=batch_size,
@@ -265,9 +381,20 @@ def k_fold_cv(
         optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
         train_losses, val_losses, val_epochs = [], [], []
+        train_interval_losses = []
+
         for epoch in range(1, epochs + 1):
             train_losses.append(
-                _run_epoch(model, train_loader, device, optimizer, use_focal_loss, alpha, gamma)
+                _run_epoch(
+                    model,
+                    train_loader,
+                    device,
+                    optimizer,
+                    use_focal_loss,
+                    alpha,
+                    gamma,
+                    train_interval_losses,
+                )
             )
             if epoch % 5 == 0:
                 val_losses.append(
@@ -279,10 +406,17 @@ def k_fold_cv(
         metrics = {k: val_result[k] for k in ('accuracy', 'precision', 'recall', 'f1', 'auc', 'average_precision', 'prevalence')}
         fold_metrics.append(metrics)
 
-        curve_data = {'train_losses': train_losses, 'val_losses': val_losses, 'val_epochs': val_epochs}
+        curve_data = {
+            'train_losses': train_losses,
+            'train_interval_losses': train_interval_losses,
+            'val_losses': val_losses,
+            'val_epochs': val_epochs,
+        }
+
         if output_dir:
             prefix = os.path.join(output_dir, f'fold_{fold + 1}')
             _save_loss_curve(train_losses, val_losses, val_epochs, f'{prefix}_loss.png')
+            _save_interval_loss_curve(train_interval_losses, f'{prefix}_interval_loss.png')
             curve_data['pr_curve'] = _save_pr_curve(val_result['labels'], val_result['probs'], f'{prefix}_pr.png')
             curve_data['roc_curve'] = _save_roc_curve(val_result['labels'], val_result['probs'], f'{prefix}_roc.png')
 
@@ -313,9 +447,9 @@ def train_and_save_results(
     gamma=2.0,
     loss_name='Focal Loss',
     k=5,
-    epochs=50,
-    batch_size=32,
-    lr=0.001,
+    epochs=200,
+    batch_size=128,
+    lr=0.002,
     device='cpu',
 ):
     print(f"\n{'=' * 80}\nThreshold: {threshold_days} days ({loss_name})\n{'=' * 80}")
@@ -355,3 +489,32 @@ def train_and_save_results(
     print(f'Saved curves: {output_dir}/')
 
     return avg, std, fold_metrics
+
+
+# * alpha controls class importance.
+# * gamma controls easy versus difficult example importance.
+
+
+# Precision: Of everything the model predicted as positive, what fraction was actually positive?
+# Recall: Of all the samples that were actually positive, what fraction did the model correctly identify?
+# recall decreases or stays the same 
+# precision can increase or decrease
+
+
+# An ROC curve shows how a model's performance changes across classification thresholds.
+#  The ROC curve plots TPR against FPR at different thresholds. 
+# * True Positive Rate (Recall): Of all actual positives, how many did the model detect?
+# \text{TPR}=\frac{TP}{TP+FN}
+# * False Positive Rate: Of all actual negatives, how many were incorrectly predicted as positive?
+# \text{FPR}=\frac{FP}{FP+TN}
+# basically it comaprares how the model says the no of positives across the two classes. this helps is learn if the 
+# model is learning soemthign abotu the class specifically or not, whether it is able to distinguish or not
+
+
+# explore class balance among k folds...there may be too less label 1 examples in one of the folds, because 
+# of which everything is being predicted as label 0.
+# see if there is some seed , whcih ensires that experiemnts are repeorducible, since we are getting same results every time
+# we store the validation values after every 5 epochs sicne we need to see that the model generalizes...it may be susscpetibrl, to the trainign data, so we do it over a longer no of epochs
+# we store the loss and the val loss curve, since we need to see how the model is learning and not just overfitting.
+# Precision–Recall is centered mainly on the positive class
+# ROC looks at performance across both sides
