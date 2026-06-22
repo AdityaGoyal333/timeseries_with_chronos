@@ -3,3 +3,6 @@ data/
 .venv/
 .DS_Store
 experiment_files/__pycache__
+experiment_files/*.pkl
+experiment_files/*focal
+/temporary
