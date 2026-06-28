@@ -182,3 +182,15 @@ if __name__ == "__main__":
 # - see if we can simplify the code 
 # - solve the aprt where the nan is getting filled with mean
 # - losses curves in terms of focal loss 
+
+
+
+
+
+# integrate wanddb or tensorboard
+# look at rpev literature for results on such nicu data 
+# interpret the range for the loss..
+# rerun the epxeriment with the new data and with masked tokens 
+# get more label 1's
+# read the focal paper and ensure that the implementation is correct
+# include the google drive link and upload all the data
