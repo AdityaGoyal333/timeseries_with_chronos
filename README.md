@@ -136,7 +136,7 @@ You also need Hugging Face access to download `amazon/chronos-2` on first run.
 
 Download the data from this google drive : 
 
-[Link to data](https://drive.google.com/drive/folders/1MC7tVKk_1s_c2Tme9Wxl5g1wkHoC5G9v?usp=sharing)
+[Link to data](https://drive.google.com/drive/folders/1xU-i8ymta5sn0TPjZKrNcSAj-yx7Sucf?usp=sharing)
 
 
 Vital sign files live under `data/download/Vitals/`:
