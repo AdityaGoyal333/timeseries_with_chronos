@@ -2,6 +2,7 @@
 
 Mortality prediction for NICU infants using heart rate (HR) and oxygen saturation (SpO₂) vital signs. Raw time series are windowed, embedded with [Amazon Chronos-2](https://huggingface.co/amazon/chronos-2), and classified with a small neural network trained via stratified k-fold cross-validation.
 
+
 ## Overview
 
 The pipeline predicts whether a NICU baby will die within **3, 5, or 7 days** of a given observation window. Non-NICU babies (survivors) serve as negative controls.
@@ -132,6 +133,11 @@ pip install torch torchvision chronos scikit-learn pandas numpy scipy matplotlib
 You also need Hugging Face access to download `amazon/chronos-2` on first run.
 
 ## Data setup
+
+Download the data from this google drive : 
+
+[Link to data](https://drive.google.com/drive/folders/1MC7tVKk_1s_c2Tme9Wxl5g1wkHoC5G9v?usp=sharing)
+
 
 Vital sign files live under `data/download/Vitals/`:
 
