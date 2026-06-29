@@ -170,6 +170,11 @@ def create_windowed_features(mat_file_path, start_time, context_size, window_siz
     return create_windowed_features_from_raw(raw_data, window_size)
 
 
+def baby_id_from_window_key(key):
+    """Recover baby_id from cache key '{baby_id}_{start}_{end}'."""
+    return key.rsplit('_', 2)[0]
+
+
 def create_window_key(mat_file, window_start, window_end):
     """Unique cache key for one window: baby_id + start + end timestamps."""
     baby_id = mat_file.split('/')[-1].replace('.mat', '')
@@ -380,24 +385,26 @@ def prepare_training_data_for_threshold(threshold_days, samples_windows_path, em
 
     embedding_keys = []
     labels = []
+    baby_ids = []
 
     for _, row in threshold_data.iterrows():
         key = create_window_key(row['mat_file'], row['window_start'], row['window_end'])
         if key in embeddings_cache:
             embedding_keys.append(key)
             labels.append(int(row['label']))
+            baby_ids.append(baby_id_from_window_key(key))
 
     print(f"  ✓ {len(embedding_keys)} samples (L0:{labels.count(0)}, L1:{labels.count(1)})")
+    print(f"  ✓ {len(set(baby_ids))} unique babies")
 
-    # Save keys + labels only; embeddings stay in the global cache
+    # Save keys + labels + baby_ids; embeddings stay in the global cache
     with open(f'labels_{threshold_days}d.pkl', 'wb') as f:
-        pl.dump({'embedding_keys': embedding_keys, 'labels': labels}, f)
+        pl.dump({'embedding_keys': embedding_keys, 'labels': labels, 'baby_ids': baby_ids}, f)
 
     print(f"  ✓ Saved: labels_{threshold_days}d.pkl (~{(len(embedding_keys) * 100) / 1024:.2f} KB)")
 
-    # Resolve keys → embedding vectors for immediate use in training
     embeddings = [embeddings_cache[key] for key in embedding_keys]
-    return embeddings, labels
+    return embeddings, labels, baby_ids
 
 
 def load_training_data_for_threshold(threshold_days):
@@ -414,6 +421,10 @@ def load_training_data_for_threshold(threshold_days):
     embeddings_cache = load_embeddings_cache()
     embeddings = [embeddings_cache[key] for key in data['embedding_keys']]
     labels = data['labels']
+    baby_ids = data.get('baby_ids')
+    if baby_ids is None:
+        baby_ids = [baby_id_from_window_key(key) for key in data['embedding_keys']]
 
     print(f"  ✓ Loaded {len(embeddings)} samples (L0:{labels.count(0)}, L1:{labels.count(1)})")
-    return embeddings, labels
+    print(f"  ✓ {len(set(baby_ids))} unique babies")
+    return embeddings, labels, baby_ids

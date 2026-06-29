@@ -149,11 +149,14 @@ def run_complete_pipeline(use_focal_loss, gamma):
     # --- Steps 4 + 5: for each threshold, prepare data and train classifier ---
     for threshold_days in THRESHOLDS_DAYS:
 
-        embeddings, labels = prepare_training_data_for_threshold(threshold_days, SAMPLED_WINDOWS_ALL_THRESHOLDS_PATH, embeddings_cache)
+        embeddings, labels, baby_ids = prepare_training_data_for_threshold(
+            threshold_days, SAMPLED_WINDOWS_ALL_THRESHOLDS_PATH, embeddings_cache
+        )
         train_and_save_results(
             threshold_days,
             embeddings,
             labels,
+            baby_ids=baby_ids,
             use_focal_loss=use_focal_loss,
             gamma=gamma,
             loss_name=loss_name,

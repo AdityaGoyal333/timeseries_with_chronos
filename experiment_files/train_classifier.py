@@ -18,7 +18,7 @@ from sklearn.metrics import (
     roc_auc_score,
     roc_curve,
 )
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import StratifiedGroupKFold, StratifiedKFold
 from torch.utils.data import DataLoader, Dataset
 from torchvision.ops import sigmoid_focal_loss
 
@@ -38,18 +38,29 @@ class EmbeddingDataset(Dataset):
         return self.embeddings[idx], self.labels[idx]
 
 
+def _output_bias_from_prevalence(positive_ratio, eps=1e-6):
+    """Initialize output bias as log(p / (1 - p)), p = positives / total."""
+    p = float(np.clip(positive_ratio, eps, 1.0 - eps))
+    return math.log(p / (1.0 - p))
+
+
 class Classifier(nn.Module):
     """MLP head: embedding dim → 512 → 256 → 1 logit."""
 
-    def __init__(self, dim, hidden=512):
+    def __init__(self, dim, hidden=512, positive_ratio=None):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(dim, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, hidden),
             nn.ReLU(),
             nn.Linear(hidden, hidden // 2),
             nn.ReLU(),
             nn.Linear(hidden // 2, 1),
         )
+        if positive_ratio is not None:
+            with torch.no_grad():
+                self.net[-1].bias.fill_(_output_bias_from_prevalence(positive_ratio))
 
     def forward(self, x):
         # squeeze(-1) keeps batch dim when batch_size == 1
@@ -112,18 +123,12 @@ class UniformClassBatchSampler(Sampler):
 
 
 
-
-
-
-
-
-
 def _focal_alpha(labels):
     """torchvision focal loss: positives get alpha, negatives get (1 - alpha).
 
     Set alpha = fraction of negatives so the rare positive class is up-weighted.
     """
-    return 0.96
+    return 0.95
 
 
 def _batch_loss(logits, labels, use_focal_loss, alpha, gamma):
@@ -243,21 +248,33 @@ def _save_interval_loss_curve(interval_losses, path):
     plt.close()
 
 
-def _save_pr_curve(labels, probs, path):
-    """PR curve with random-guess baseline (= positive class prevalence)."""
+def _compute_pr_curve(labels, probs):
+    """Return precision/recall arrays and AP for one validation fold."""
     labels = np.asarray(labels, dtype=int)
     probs = np.asarray(probs, dtype=float)
-    prevalence = labels.mean()
+    prevalence = float(labels.mean())
 
     if len(np.unique(labels)) < 2:
-        ap = prevalence
-        precision = np.array([prevalence, prevalence])
-        recall = np.array([0.0, 1.0])
-    else:
-        precision, recall, _ = precision_recall_curve(labels, probs)
-        ap = average_precision_score(labels, probs)
-        # Drop sklearn sentinel point (recall=0, precision=1) — it creates a fake vertical cliff
-        # precision, recall = precision[1:], recall[1:]
+        return {
+            'precision': np.array([prevalence, prevalence]),
+            'recall': np.array([0.0, 1.0]),
+            'average_precision': prevalence,
+            'prevalence': prevalence,
+        }
+
+    precision, recall, _ = precision_recall_curve(labels, probs)
+    return {
+        'precision': precision,
+        'recall': recall,
+        'average_precision': float(average_precision_score(labels, probs)),
+        'prevalence': prevalence,
+    }
+
+
+def _plot_pr_curve(pr_data, path):
+    """Save a per-fold PR curve PNG from precomputed curve data."""
+    precision, recall = pr_data['precision'], pr_data['recall']
+    ap, prevalence = pr_data['average_precision'], pr_data['prevalence']
 
     plt.figure(figsize=(6, 5))
     plt.plot(recall, precision, label=f'Model (AP = {ap:.3f})')
@@ -273,24 +290,39 @@ def _save_pr_curve(labels, probs, path):
     plt.savefig(path, dpi=150)
     plt.close()
 
-    return {'precision': precision, 'recall': recall, 'average_precision': ap, 'prevalence': prevalence}
+
+def _save_pr_curve(labels, probs, path):
+    """PR curve with random-guess baseline (= positive class prevalence)."""
+    pr_data = _compute_pr_curve(labels, probs)
+    _plot_pr_curve(pr_data, path)
+    return pr_data
 
 
-def _save_roc_curve(labels, probs, path):
+def _compute_roc_curve(labels, probs):
+    """Return FPR/TPR arrays and AUC for one validation fold."""
     labels = np.asarray(labels, dtype=int)
     probs = np.asarray(probs, dtype=float)
 
-    plt.figure(figsize=(6, 5))
     if len(np.unique(labels)) < 2:
+        return {'fpr': np.array([]), 'tpr': np.array([]), 'auc': float('nan')}
+
+    fpr, tpr, _ = roc_curve(labels, probs)
+    return {'fpr': fpr, 'tpr': tpr, 'auc': float(auc(fpr, tpr))}
+
+
+def _plot_roc_curve(roc_data, path):
+    """Save a per-fold ROC curve PNG from precomputed curve data."""
+    fpr, tpr = roc_data['fpr'], roc_data['tpr']
+    roc_auc = roc_data['auc']
+
+    plt.figure(figsize=(6, 5))
+    if len(fpr) == 0:
         plt.text(0.5, 0.5, 'ROC undefined\n(only one class in val fold)', ha='center', va='center')
         plt.xlim(0, 1)
         plt.ylim(0, 1)
         plt.savefig(path, dpi=150)
         plt.close()
-        return {'fpr': np.array([]), 'tpr': np.array([]), 'auc': float('nan')}
-
-    fpr, tpr, _ = roc_curve(labels, probs)
-    roc_auc = auc(fpr, tpr)
+        return
 
     plt.plot(fpr, tpr, label=f'Model (AUC = {roc_auc:.3f})')
     plt.plot([0, 1], [0, 1], linestyle='--', color='gray', label='Random (0.5)')
@@ -305,12 +337,126 @@ def _save_roc_curve(labels, probs, path):
     plt.savefig(path, dpi=150)
     plt.close()
 
-    return {'fpr': fpr, 'tpr': tpr, 'auc': roc_auc}
+
+def _save_roc_curve(labels, probs, path):
+    roc_data = _compute_roc_curve(labels, probs)
+    _plot_roc_curve(roc_data, path)
+    return roc_data
+
+
+def _save_cumulative_roc(fold_roc_curves, output_dir, k):
+    """Mean ROC across folds with ±1 std band (reuses per-fold FPR/TPR arrays)."""
+    fpr_grid = np.linspace(0, 1, 1000)
+    tpr_interp, aucs = [], []
+
+    for roc in fold_roc_curves:
+        fpr, tpr = roc['fpr'], roc['tpr']
+        if len(fpr) == 0:
+            continue
+        aucs.append(roc['auc'])
+        tpr_interp.append(np.interp(fpr_grid, fpr, tpr))
+
+    if not tpr_interp:
+        return None
+
+    tpr_interp = np.asarray(tpr_interp)
+    mean_tpr = tpr_interp.mean(axis=0)
+    std_tpr = tpr_interp.std(axis=0)
+    mean_auc = float(np.mean(aucs))
+
+    plt.figure(figsize=(6, 6))
+    plt.plot(fpr_grid, mean_tpr, label=f'ROC Curve (AUC = {mean_auc:.3f})')
+    plt.fill_between(fpr_grid, mean_tpr - std_tpr, mean_tpr + std_tpr, alpha=0.2)
+    plt.plot([0, 1], [0, 1], linestyle='--', color='k', alpha=0.5, linewidth=1)
+    plt.xlabel('False Positive Rate', fontsize=12)
+    plt.ylabel('True Positive Rate', fontsize=12)
+    plt.title(f'ROC Curve ({k}-fold CV)', fontsize=13)
+    plt.legend()
+    plt.xlim(0, 1)
+    plt.ylim(0, 1)
+    plt.tick_params(axis='both', which='major', labelsize=12)
+    plt.tight_layout()
+    path = os.path.join(output_dir, 'ROC curve.png')
+    plt.savefig(path, dpi=300, bbox_inches='tight')
+    plt.close()
+
+    return {
+        'fpr_grid': fpr_grid,
+        'mean_tpr': mean_tpr,
+        'std_tpr': std_tpr,
+        'mean_auc': mean_auc,
+        'fold_aucs': aucs,
+        'path': path,
+    }
+
+
+def _save_cumulative_pr(fold_pr_curves, output_dir, k):
+    """Mean PR across folds with ±1 std band (reuses per-fold precision/recall arrays)."""
+    recall_grid = np.linspace(0, 1, 1000)
+    precision_interp, average_precisions = [], []
+
+    for pr in fold_pr_curves:
+        precision, recall = pr['precision'], pr['recall']
+        average_precisions.append(pr['average_precision'])
+        precision_interp.append(np.interp(recall_grid, recall[::-1], precision[::-1]))
+
+    if not precision_interp:
+        return None
+
+    precision_interp = np.asarray(precision_interp)
+    mean_precision = precision_interp.mean(axis=0)
+    std_precision = precision_interp.std(axis=0)
+    mean_ap = float(np.mean(average_precisions))
+
+    plt.figure(figsize=(6, 6))
+    plt.plot(recall_grid, mean_precision, label=f'PR Curve (AUPRC = {mean_ap:.3f})')
+    plt.fill_between(
+        recall_grid,
+        mean_precision - std_precision,
+        mean_precision + std_precision,
+        alpha=0.2,
+    )
+    plt.xlabel('Recall', fontsize=12)
+    plt.ylabel('Precision', fontsize=12)
+    plt.title(f'Precision/Recall Curve ({k}-fold CV)', fontsize=13)
+    plt.legend(fontsize=11)
+    plt.xlim(0, 1)
+    plt.ylim(0, 1)
+    plt.tick_params(axis='both', which='major', labelsize=12)
+    plt.tight_layout()
+    path = os.path.join(output_dir, 'PR curve.png')
+    plt.savefig(path, dpi=300, bbox_inches='tight')
+    plt.close()
+
+    return {
+        'recall_grid': recall_grid,
+        'mean_precision': mean_precision,
+        'std_precision': std_precision,
+        'mean_ap': mean_ap,
+        'fold_aps': average_precisions,
+        'path': path,
+    }
+
+
+def _save_fold_probabilities(y_true_folds, y_score_folds, fold_pr_curves, fold_roc_curves, output_dir, k):
+    """Persist per-fold validation outputs and precomputed curve arrays."""
+    fold_probabilities = {
+        'y_true_folds': [np.asarray(y, dtype=int) for y in y_true_folds],
+        'y_score_folds': [np.asarray(s, dtype=float) for s in y_score_folds],
+        'pr_curves': fold_pr_curves,
+        'roc_curves': fold_roc_curves,
+        'k': k,
+    }
+    path = os.path.join(output_dir, 'fold_probabilities.pkl')
+    with open(path, 'wb') as f:
+        pl.dump(fold_probabilities, f)
+    return fold_probabilities, path
 
 
 def k_fold_cv(
     embeddings,
     labels,
+    baby_ids=None,
     k=5,
     epochs=50,
     batch_size=32,
@@ -323,7 +469,7 @@ def k_fold_cv(
 ):
     if len(embeddings) == 0:
         print('No embeddings to train on!')
-        return None, None, None, None
+        return None, None, None, None, None, None
 
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
@@ -337,18 +483,38 @@ def k_fold_cv(
 
     loss_name = f'Focal (alpha={alpha:.3f}, gamma={gamma})' if use_focal_loss else 'BCE'
     pos_rate = labels.mean()
+    n_babies = len(set(baby_ids)) if baby_ids is not None else None
+    split_name = 'StratifiedGroupKFold (by baby_id)' if baby_ids is not None else 'StratifiedKFold (by window)'
     print(f"\n{'=' * 80}")
-    print(f'K-fold CV | {loss_name}')
+    print(f'K-fold CV | {loss_name} | {split_name}')
     print(f'Samples: {len(labels)} | Pos rate: {pos_rate:.3f} ({labels.sum()} positives)')
-    print(f'Folds: {k} | Embedding dim: {dim}')
+    if n_babies is not None:
+        print(f'Babies: {n_babies} | Folds: {k}')
+    else:
+        print(f'Folds: {k}')
+    print(f'Embedding dim: {dim}')
     if output_dir:
         print(f'Curves: {output_dir}')
     print('=' * 80)
 
-    skf = StratifiedKFold(n_splits=k, shuffle=True, random_state=42)
-    fold_metrics, fold_curve_data = [], []
+    if baby_ids is not None:
+        baby_ids = np.asarray(baby_ids)
+        splitter = StratifiedGroupKFold(n_splits=k, shuffle=True, random_state=42)
+        split_iter = splitter.split(embedding_matrix, labels, groups=baby_ids)
+    else:
+        splitter = StratifiedKFold(n_splits=k, shuffle=True, random_state=42)
+        split_iter = splitter.split(embedding_matrix, labels)
 
-    for fold, (train_idx, val_idx) in enumerate(skf.split(embedding_matrix, labels)):
+    fold_metrics, fold_curve_data = [], []
+    fold_y_true, fold_y_probs = [], []
+
+    for fold, (train_idx, val_idx) in enumerate(split_iter):
+        if baby_ids is not None:
+            train_babies = set(baby_ids[train_idx])
+            val_babies = set(baby_ids[val_idx])
+            overlap = train_babies & val_babies
+            assert not overlap, f"Fold {fold + 1}: {len(overlap)} babies in both train and val"
+
         print(f'Fold {fold + 1}/{k}...', end=' ')
 
         train_dataset = EmbeddingDataset(
@@ -377,7 +543,8 @@ def k_fold_cv(
             batch_size=batch_size,
         )
 
-        model = Classifier(dim).to(device)
+        train_pos_rate = labels[train_idx].mean()
+        model = Classifier(dim, positive_ratio=train_pos_rate).to(device)
         optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
         train_losses, val_losses, val_epochs = [], [], []
@@ -403,22 +570,29 @@ def k_fold_cv(
                 val_epochs.append(epoch)
 
         val_result = _evaluate(model, val_loader, device)
-        metrics = {k: val_result[k] for k in ('accuracy', 'precision', 'recall', 'f1', 'auc', 'average_precision', 'prevalence')}
+        fold_y_true.append(val_result['labels'])
+        fold_y_probs.append(val_result['probs'])
+        metrics = {name: val_result[name] for name in ('accuracy', 'precision', 'recall', 'f1', 'auc', 'average_precision', 'prevalence')}
         fold_metrics.append(metrics)
+
+        pr_curve = _compute_pr_curve(val_result['labels'], val_result['probs'])
+        roc_curve_data = _compute_roc_curve(val_result['labels'], val_result['probs'])
 
         curve_data = {
             'train_losses': train_losses,
             'train_interval_losses': train_interval_losses,
             'val_losses': val_losses,
             'val_epochs': val_epochs,
+            'pr_curve': pr_curve,
+            'roc_curve': roc_curve_data,
         }
 
         if output_dir:
             prefix = os.path.join(output_dir, f'fold_{fold + 1}')
             _save_loss_curve(train_losses, val_losses, val_epochs, f'{prefix}_loss.png')
             _save_interval_loss_curve(train_interval_losses, f'{prefix}_interval_loss.png')
-            curve_data['pr_curve'] = _save_pr_curve(val_result['labels'], val_result['probs'], f'{prefix}_pr.png')
-            curve_data['roc_curve'] = _save_roc_curve(val_result['labels'], val_result['probs'], f'{prefix}_roc.png')
+            _plot_pr_curve(pr_curve, f'{prefix}_pr.png')
+            _plot_roc_curve(roc_curve_data, f'{prefix}_roc.png')
 
         fold_curve_data.append(curve_data)
         print(
@@ -430,26 +604,44 @@ def k_fold_cv(
     avg = {key: float(np.nanmean([f[key] for f in fold_metrics])) for key in fold_metrics[0]}
     std = {key: float(np.nanstd([f[key] for f in fold_metrics])) for key in fold_metrics[0]}
 
+    cumulative_curves = {}
+    fold_probabilities = None
+    fold_probabilities_path = None
+
+    if output_dir and fold_curve_data:
+        fold_pr_curves = [fd['pr_curve'] for fd in fold_curve_data]
+        fold_roc_curves = [fd['roc_curve'] for fd in fold_curve_data]
+
+        cumulative_curves['roc'] = _save_cumulative_roc(fold_roc_curves, output_dir, k)
+        cumulative_curves['pr'] = _save_cumulative_pr(fold_pr_curves, output_dir, k)
+        fold_probabilities, fold_probabilities_path = _save_fold_probabilities(
+            fold_y_true, fold_y_probs, fold_pr_curves, fold_roc_curves, output_dir, k
+        )
+        print(f'\nSaved cumulative ROC: {cumulative_curves["roc"]["path"]}')
+        print(f'Saved cumulative PR:  {cumulative_curves["pr"]["path"]}')
+        print(f'Saved fold probs:     {fold_probabilities_path}')
+
     print(f"\n{'=' * 80}")
     print('Average metrics')
     for key in avg:
         print(f'  {key:18s}: {avg[key]:.4f} ± {std[key]:.4f}')
     print('=' * 80)
 
-    return avg, std, fold_metrics, fold_curve_data
+    return avg, std, fold_metrics, fold_curve_data, cumulative_curves, fold_probabilities
 
 
 def train_and_save_results(
     threshold_days,
     embeddings,
     labels,
+    baby_ids=None,
     use_focal_loss=True,
     gamma=2.0,
     loss_name='Focal Loss',
     k=5,
-    epochs=200,
-    batch_size=128,
-    lr=0.002,
+    epochs=250,
+    batch_size=400,
+    lr=0.001,
     device='cpu',
 ):
     print(f"\n{'=' * 80}\nThreshold: {threshold_days} days ({loss_name})\n{'=' * 80}")
@@ -457,9 +649,10 @@ def train_and_save_results(
     suffix = 'focal' if use_focal_loss else 'ce'
     output_dir = f'training_curves_{threshold_days}d_{suffix}'
 
-    avg, std, fold_metrics, fold_curve_data = k_fold_cv(
+    avg, std, fold_metrics, fold_curve_data, cumulative_curves, fold_probabilities = k_fold_cv(
         embeddings,
         labels,
+        baby_ids=baby_ids,
         k=k,
         epochs=epochs,
         batch_size=batch_size,
@@ -479,6 +672,8 @@ def train_and_save_results(
                 'std': std,
                 'fold_metrics': fold_metrics,
                 'fold_curve_data': fold_curve_data,
+                'cumulative_curves': cumulative_curves,
+                'fold_probabilities': fold_probabilities,
                 'curve_output_dir': output_dir,
                 'loss_type': loss_name,
                 'gamma': gamma if use_focal_loss else None,

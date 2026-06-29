@@ -7,3 +7,7 @@ experiment_files/*.pkl
 experiment_files/*focal
 /temporary
 /lr_baseline/*.csv
+/training_curves*
+/labels*
+/results*
+/docs
