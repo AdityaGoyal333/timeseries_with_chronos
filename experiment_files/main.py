@@ -170,29 +170,3 @@ def run_complete_pipeline(use_focal_loss, gamma):
 
 if __name__ == "__main__":
     run_complete_pipeline(use_focal_loss=True, gamma=2.0)
-
-
-
-# ways to valdiate training data preparation 
-# compare the implementation with prev chronos files 
-
-
-
-# thigns to imrpvoe 
-# - the roc , pr curve 
-# - see if we can integrate metadata
-# - see if we can simplify the code 
-# - solve the aprt where the nan is getting filled with mean
-# - losses curves in terms of focal loss 
-
-
-
-
-
-# integrate wanddb or tensorboard
-# look at rpev literature for results on such nicu data 
-# interpret the range for the loss..
-# rerun the epxeriment with the new data and with masked tokens 
-# get more label 1's
-# read the focal paper and ensure that the implementation is correct
-# include the google drive link and upload all the data

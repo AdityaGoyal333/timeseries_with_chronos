@@ -11,4 +11,5 @@ experiment_files/*focal
 /labels*
 /results*
 /docs
-/EDA/pkl files and plots
+/EDA/plots
+*.pkl

@@ -8,7 +8,7 @@ import pickle as pl
 import glob
 
 
-def analyze_coverage_non_optimal( all_timestamps, results, wsize, final_arr, birthtime, deathtime):
+def analyze_coverage_non_optimal( all_timestamps, results, wsize, final_arr, birthtime, deathtime, debug_output=False):
     """
     Non-vectorized implementation matching the vectorized logic.
     """
@@ -55,7 +55,7 @@ def analyze_coverage_non_optimal( all_timestamps, results, wsize, final_arr, bir
     }
     
     
-def analyze_coverage_vectorized(all_timestamps, results, wsize, final_arr, birthtime, deathtime):
+def analyze_coverage_vectorized(all_timestamps, results, wsize, final_arr, birthtime, deathtime, debug_output=False):
     """
     Vectorized version - faster for large datasets
     """
@@ -97,11 +97,12 @@ def analyze_coverage_vectorized(all_timestamps, results, wsize, final_arr, birth
     misses = total_windows - hits
 
 
-    # print(f"Birthtime: {birthtime}" )
-    # print(f"Deathtime: {deathtime}")
-    # print(f"first overall: {first_overall}")
-    # print(all_timestamps[0].item())
-    # print(all_timestamps[-1].item())
+    print(f"Birthtime: {birthtime}" )
+    print(f"Deathtime: {deathtime}")
+    print(f"first overall: {first_overall}")
+    print("valid recorded timestamps")
+    print(all_timestamps[0].item())
+    print(all_timestamps[-1].item())
     
     results[wsize] = {
         'hits': hits,
@@ -116,7 +117,7 @@ def analyze_coverage_vectorized(all_timestamps, results, wsize, final_arr, birth
     
     
     
-def analyze_baby_window_coverage(mat_file_path, window_sizes,optimized):
+def analyze_baby_window_coverage(mat_file_path, window_sizes,optimized,debug_output=False):
     """
     Analyze window coverage for a single baby across different window sizes
     """
@@ -143,6 +144,9 @@ def analyze_baby_window_coverage(mat_file_path, window_sizes,optimized):
         deathtime = valid_timestamps[-1].item()
     else:
         deathtime = age_at_death*86400 + birthtime
+        
+    if(debug_output):
+        print(f"age at death: {age_at_death}",flush=True)
     
     if 'HR' in vname and 'SPO2-%' in vname:
         if (vname[0][0][0] == 'HR') and (vname[2][0][0] == 'SPO2-%'): 
@@ -165,11 +169,11 @@ def analyze_baby_window_coverage(mat_file_path, window_sizes,optimized):
         # print(f" - analyzing for window size: {wsize}")
         
         if(optimized):
-            analyze_coverage_vectorized(valid_timestamps, results, wsize, final_arr,birthtime,deathtime)
+            analyze_coverage_vectorized(valid_timestamps, results, wsize, final_arr,birthtime,deathtime,debug_output=True)
             # return analyze_coverage_vectorized(valid_timestamps, results, wsize, final_arr)
             
         else:
-            analyze_coverage_non_optimal(valid_timestamps, results, wsize, final_arr,birthtime,deathtime)
+            analyze_coverage_non_optimal(valid_timestamps, results, wsize, final_arr,birthtime,deathtime,debug_output=True)
             # analyze_coverage(valid_timestamps,results,wsize,final_arr)
             # return analyze_coverage_non_optimal(valid_timestamps, results, wsize, final_arr)
     
@@ -232,6 +236,7 @@ def analyze_all_babies_windows(window_sizes, mat_files, optimized, filename, max
 
         return index, baby_id, baby_result, row
 
+    completed = 0
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_file = {
             executor.submit(analyze_one_baby, i, file_path): (i, file_path)
@@ -247,7 +252,6 @@ def analyze_all_babies_windows(window_sizes, mat_files, optimized, filename, max
             try:
                 index, baby_id, baby_result, row = future.result()
                 print(f"processed {baby_id}",flush=True)
-                print(index)
 
             except Exception:
                 print(
@@ -259,23 +263,19 @@ def analyze_all_babies_windows(window_sizes, mat_files, optimized, filename, max
 
             # These writes occur in the main thread, so no lock is needed.
             baby_results[baby_id] = baby_result
-            all_results.append((index, row))
+            all_results.append(row)
+            completed +=1
             
-            # if(baby_id%100==0):
-            #     save_results_to_pickle(pd.DataFrame(all_results), baby_results,window_sizes, filename=filename)
+            if(completed%100==0):
+                save_results_to_pickle(pd.DataFrame(all_results), baby_results,window_sizes, filename=filename)
 
-            print(
-                f"Completed {completed_count}/{len(mat_files)}: "
-                f"{file_path}"
-            )
+                print(
+                    f"Completed {completed_count}/{len(mat_files)}: "
+                    # f"{file_path}"
+                )
 
-    # as_completed returns results in completion order.
-    # Sort them to restore the original mat_files order.
-    all_results.sort(key=lambda item: item[0])
-    ordered_rows = [row for _, row in all_results]
-
-    summary_df = pd.DataFrame(ordered_rows)
-
+    # Create summary DataFrame
+    summary_df = pd.DataFrame(all_results)    
     return summary_df, baby_results
 
 
@@ -288,6 +288,7 @@ def run_non_optimal_analysis(window_sizes,mat_files):
     save_results_to_pickle(summary_df, baby_results, window_sizes, filename=filename)
     print("Non-optimal analysis completed!")
 
+
 def run_vectorized_analysis(window_sizes,mat_files):
     """Thread function for vectorized analysis"""
     filename = 'results_vectorized.pkl'
@@ -299,6 +300,11 @@ def run_vectorized_analysis(window_sizes,mat_files):
     
 
 if __name__ == "__main__":
+    
+    
+    """
+    for validating both the optimal and vectorized implementations (already done)
+    """
     # Create threads
     # thread_non_optimal = threading.Thread(target=run_non_optimal_analysis)
     # thread_vectorized = threading.Thread(target=run_vectorized_analysis)
@@ -315,53 +321,19 @@ if __name__ == "__main__":
     # print("Both analyses completed!")
     
     # arr = [int(math.pow(1.338,x)) for x in range(20,30)]
-    mat_files = set(sorted(glob.glob('./data/download/Vitals/*.mat')))
-    window_sizes = [1, 2, 3, 4, 5, 10, 20, 24, 32, 44, 58, 78, 105, 141, 188, 252, 300, 1083, 1940, 3000] 
-    run_vectorized_analysis(window_sizes,mat_files)
     
     
+    """
+    for running for a group of mat files and window sizes
+    """
+    # mat_files = set(sorted(glob.glob('./data/download/Vitals/*.mat')))
+    # window_sizes = [1, 2, 3, 4, 5, 10, 20, 24, 32, 44, 58, 78, 105, 141, 188, 252, 300, 1083, 1940, 3000] 
+    # run_vectorized_analysis(window_sizes,mat_files)
     
-
-# def analyze_all_babies_windows(window_sizes,mat_files,optimized,filename):
-#     """
-#     Analyze window coverage for all babies across different window sizes
-#     """
     
-#     # Store results for each baby and window size
-#     all_results = []
-#     baby_results = {}
+    """
+    for testing
+    """
+    # print(analyze_baby_window_coverage('/Users/adityagoyal/Desktop/Research - yin li/timeseries_project/timeseries_with_chronos/data/download/Vitals/NICU_5480_vitals.mat', [50],True,True))
     
-#     print(f"Analyzing {len(mat_files)} babies with window sizes: {window_sizes}")
     
-#     for i, file_path in enumerate(mat_files):
-#         print(f"\nProcessing baby {i+1}/{len(mat_files)}: {file_path}")
-        
-#         try:
-#             # Analyze this baby
-#             baby_result = analyze_baby_window_coverage(file_path, window_sizes,optimized)
-            
-#         except:
-#             traceback.print_exc()
-#             continue
-            
-#         baby_id = file_path.split('/')[-1]  # Extract filename as baby ID
-#         baby_results[baby_id] = baby_result
-        
-#         # Create a row for summary DataFrame
-#         row = OrderedDict()
-#         row['baby_id'] = baby_id
-#         for wsize in window_sizes:
-#             row[f'coverage_{wsize}s'] = baby_result[wsize]['coverage_rate']
-#             row[f'hits_{wsize}s'] = baby_result[wsize]['hits']
-#             row[f'total_windows_{wsize}s'] = baby_result[wsize]['total_windows']
-        
-#         all_results.append(row)
-        
-#         # if(i%60==0):
-#         #     save_results_to_pickle(pd.DataFrame(all_results), baby_results,window_sizes, filename=filename)
-                    
-    
-#     # Create summary DataFrame
-#     summary_df = pd.DataFrame(all_results)
-    
-#     return summary_df, baby_results
