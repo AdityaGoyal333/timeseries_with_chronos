@@ -17,7 +17,6 @@ Run directly:
 
 import os
 import pickle as pl
-import shutil
 import pandas as pd
 from pathlib import Path
 

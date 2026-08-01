@@ -1,6 +1,6 @@
 data/
 .cursor/
-.venv/
+venv/
 .DS_Store
 experiment_files/__pycache__
 experiment_files/*.pkl
@@ -11,3 +11,4 @@ experiment_files/*focal
 /labels*
 /results*
 /docs
+/EDA/pkl files and plots
