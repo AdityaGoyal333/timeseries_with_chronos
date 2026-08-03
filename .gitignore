@@ -1,4 +1,5 @@
 data/
+old_files/
 .cursor/
 venv/
 .DS_Store
