@@ -251,6 +251,115 @@ def _save_interval_loss_curve(interval_losses, path):
     plt.close()
 
 
+def _save_cumulative_loss_curve(fold_curve_data, output_dir, k):
+    """Per-fold curves (faint) + mean ± std (bold), on separate train and val plots."""
+    train_by_fold = np.array([fd['train_losses'] for fd in fold_curve_data], dtype=float)
+    val_by_fold = np.array([fd['val_losses'] for fd in fold_curve_data], dtype=float)
+    val_epochs = np.asarray(fold_curve_data[0]['val_epochs'], dtype=int)
+
+    n_epochs = train_by_fold.shape[1]
+    for fd in fold_curve_data:
+        if len(fd['train_losses']) != n_epochs:
+            raise ValueError('All folds must have the same number of train loss points.')
+        if list(fd['val_epochs']) != list(val_epochs):
+            raise ValueError('All folds must use the same val epoch schedule.')
+
+    train_epochs = np.arange(1, n_epochs + 1)
+    mean_train = train_by_fold.mean(axis=0)
+    std_train = train_by_fold.std(axis=0)
+    mean_val = val_by_fold.mean(axis=0)
+    std_val = val_by_fold.std(axis=0)
+
+    n_folds = train_by_fold.shape[0]
+    cmap = plt.cm.tab10 if n_folds <= 10 else plt.cm.tab20
+    fold_colors = [cmap(i % cmap.N) for i in range(n_folds)]
+    fold_alpha = 0.65
+    mean_color = 'black'
+
+    def _legend_kwargs():
+        return {'fontsize': 8, 'ncol': 2, 'loc': 'upper right'}
+
+    # --- Train ---
+    plt.figure(figsize=(9, 5))
+    for i in range(n_folds):
+        plt.plot(
+            train_epochs,
+            train_by_fold[i],
+            color=fold_colors[i],
+            alpha=fold_alpha,
+            linewidth=1.2,
+            label=f'Fold {i + 1}',
+        )
+    plt.fill_between(
+        train_epochs,
+        mean_train - std_train,
+        mean_train + std_train,
+        color=mean_color,
+        alpha=0.15,
+        zorder=5,
+    )
+    plt.plot(
+        train_epochs,
+        mean_train,
+        color=mean_color,
+        linewidth=2.5,
+        zorder=6,
+        label='Mean ± std',
+    )
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.title(f'Cumulative train loss ({k}-fold CV)')
+    plt.legend(**_legend_kwargs())
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    train_path = os.path.join(output_dir, 'Loss curve train.png')
+    plt.savefig(train_path, dpi=150)
+    plt.close()
+
+    # --- Val (every 5 epochs) ---
+    plt.figure(figsize=(9, 5))
+    for i in range(n_folds):
+        plt.plot(
+            val_epochs,
+            val_by_fold[i],
+            color=fold_colors[i],
+            alpha=fold_alpha,
+            linewidth=1.2,
+            marker='o',
+            markersize=3,
+            label=f'Fold {i + 1}',
+        )
+    plt.fill_between(
+        val_epochs,
+        mean_val - std_val,
+        mean_val + std_val,
+        color=mean_color,
+        alpha=0.15,
+        zorder=5,
+    )
+    plt.plot(
+        val_epochs,
+        mean_val,
+        color=mean_color,
+        linewidth=2.5,
+        marker='o',
+        markersize=5,
+        zorder=6,
+        label='Mean ± std',
+    )
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.title(f'Cumulative val loss ({k}-fold CV, every 5 epochs)')
+    plt.legend(**_legend_kwargs())
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    val_path = os.path.join(output_dir, 'Loss curve val.png')
+    plt.savefig(val_path, dpi=150)
+    plt.close()
+
+    return {'train_path': train_path, 'val_path': val_path}
+
+
 def _compute_pr_curve(labels, probs):
     """Return precision/recall arrays and AP for one validation fold."""
     labels = np.asarray(labels, dtype=int)
@@ -1033,12 +1142,15 @@ def k_fold_cv(
         cumulative_curves['confusion_matrix'] = _save_cumulative_confusion_matrix(
             fold_confusion_matrices, output_dir, k
         )
+        cumulative_curves['loss'] = _save_cumulative_loss_curve(fold_curve_data, output_dir, k)
         fold_probabilities, fold_probabilities_path = _save_fold_probabilities(
             fold_y_true, fold_y_probs, fold_pr_curves, fold_roc_curves, output_dir, k
         )
         print(f'\nSaved cumulative ROC: {cumulative_curves["roc"]["path"]}')
         print(f'Saved cumulative PR:  {cumulative_curves["pr"]["path"]}')
         print(f'Saved cumulative CM:  {cumulative_curves["confusion_matrix"]["path"]}')
+        print(f'Saved cumulative loss (train): {cumulative_curves["loss"]["train_path"]}')
+        print(f'Saved cumulative loss (val):   {cumulative_curves["loss"]["val_path"]}')
         print(f'Saved fold probs:     {fold_probabilities_path}')
 
     print(f"\n{'=' * 80}")
