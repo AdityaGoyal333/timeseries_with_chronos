@@ -253,6 +253,7 @@ def _save_interval_loss_curve(interval_losses, path):
 
 def _save_cumulative_loss_curve(fold_curve_data, output_dir, k):
     """Per-fold curves (faint) + mean ± std (bold), on separate train and val plots."""
+    
     train_by_fold = np.array([fd['train_losses'] for fd in fold_curve_data], dtype=float)
     val_by_fold = np.array([fd['val_losses'] for fd in fold_curve_data], dtype=float)
     val_epochs = np.asarray(fold_curve_data[0]['val_epochs'], dtype=int)
@@ -282,30 +283,9 @@ def _save_cumulative_loss_curve(fold_curve_data, output_dir, k):
     # --- Train ---
     plt.figure(figsize=(9, 5))
     for i in range(n_folds):
-        plt.plot(
-            train_epochs,
-            train_by_fold[i],
-            color=fold_colors[i],
-            alpha=fold_alpha,
-            linewidth=1.2,
-            label=f'Fold {i + 1}',
-        )
-    plt.fill_between(
-        train_epochs,
-        mean_train - std_train,
-        mean_train + std_train,
-        color=mean_color,
-        alpha=0.15,
-        zorder=5,
-    )
-    plt.plot(
-        train_epochs,
-        mean_train,
-        color=mean_color,
-        linewidth=2.5,
-        zorder=6,
-        label='Mean ± std',
-    )
+        plt.plot(train_epochs, train_by_fold[i], color=fold_colors[i], alpha=fold_alpha, linewidth=1.2, label=f'Fold {i + 1}')
+    plt.fill_between(train_epochs, mean_train - std_train, mean_train + std_train, color=mean_color, alpha=0.15, zorder=5)
+    plt.plot(train_epochs, mean_train, color=mean_color, linewidth=2.5, zorder=6, label='Mean ± std')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
     plt.title(f'Cumulative train loss ({k}-fold CV)')
@@ -319,34 +299,9 @@ def _save_cumulative_loss_curve(fold_curve_data, output_dir, k):
     # --- Val (every 5 epochs) ---
     plt.figure(figsize=(9, 5))
     for i in range(n_folds):
-        plt.plot(
-            val_epochs,
-            val_by_fold[i],
-            color=fold_colors[i],
-            alpha=fold_alpha,
-            linewidth=1.2,
-            marker='o',
-            markersize=3,
-            label=f'Fold {i + 1}',
-        )
-    plt.fill_between(
-        val_epochs,
-        mean_val - std_val,
-        mean_val + std_val,
-        color=mean_color,
-        alpha=0.15,
-        zorder=5,
-    )
-    plt.plot(
-        val_epochs,
-        mean_val,
-        color=mean_color,
-        linewidth=2.5,
-        marker='o',
-        markersize=5,
-        zorder=6,
-        label='Mean ± std',
-    )
+        plt.plot(val_epochs, val_by_fold[i], color=fold_colors[i], alpha=fold_alpha, linewidth=1.2, marker='o', markersize=3, label=f'Fold {i + 1}')
+    plt.fill_between(val_epochs, mean_val - std_val, mean_val + std_val, color=mean_color, alpha=0.15, zorder=5)
+    plt.plot(val_epochs, mean_val, color=mean_color, linewidth=2.5, marker='o', markersize=5, zorder=6, label='Mean ± std')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
     plt.title(f'Cumulative val loss ({k}-fold CV, every 5 epochs)')
@@ -357,7 +312,10 @@ def _save_cumulative_loss_curve(fold_curve_data, output_dir, k):
     plt.savefig(val_path, dpi=150)
     plt.close()
 
-    return {'train_path': train_path, 'val_path': val_path}
+    return {
+        'train_path': train_path, 
+        'val_path': val_path
+    }
 
 
 def _compute_pr_curve(labels, probs):
@@ -482,15 +440,7 @@ def _save_confusion_matrix_plot(counts, path, title):
     # Write the count inside each cell.
     for row in range(2):
         for col in range(2):
-            plt.text(
-                col,
-                row,
-                str(counts[row, col]),
-                ha='center',
-                va='center',
-                color='black' if counts[row, col] < counts.max() / 2 else 'white',
-                fontsize=14,
-            )
+            plt.text(col, row, str(counts[row, col]), ha='center', va='center', color='black' if counts[row, col] < counts.max() / 2 else 'white', fontsize=14)
 
     plt.xticks([0, 1], class_names, rotation=15, ha='right')
     plt.yticks([0, 1], class_names)
@@ -502,151 +452,43 @@ def _save_confusion_matrix_plot(counts, path, title):
     plt.close()
 
 
-def _save_cumulative_confusion_matrix(fold_confusion_matrices, output_dir, k):
-    """Sum per-fold confusion matrices and save one pooled (out-of-fold) plot."""
-    # Each fold's val set is disjoint, so summing counts = one CM over all data.
-    cumulative = np.sum(np.asarray(fold_confusion_matrices, dtype=int), axis=0)
-    path = os.path.join(output_dir, 'Confusion matrix.png')
-    _save_confusion_matrix_plot(
-        cumulative,
-        path,
-        title=f'Cumulative confusion matrix ({k}-fold CV, threshold={DECISION_THRESHOLD})',
-    )
-    return {'counts': cumulative, 'path': path}
+def _save_cumulative_confusion_matrix(labels, probs, output_dir, threshold):
+    labels_cumulative = np.array([])
+    probs_cumulative = np.array([])
+    
+    for fold_label in labels:
+        labels_cumulative = np.append(labels_cumulative,fold_label)
+        
+    for prob in probs:    
+        probs_cumulative = np.append(probs_cumulative,prob)
+        
+    predicted_labels = (probs_cumulative >=threshold).astype(int)
+    
+    fold_cm = _confusion_matrix_counts(labels_cumulative, predicted_labels)
+    path = os.path.join(output_dir, "confusion_matrix.png")
+    _save_confusion_matrix_plot(fold_cm, path, title=f'Cumulative confusion matrix (threshold={threshold})')
+    
+    
+def _save_cumulative_roc_added(labels, probs, output_dir, k):
+    """ROC from all fold (fpr, tpr) points concatenated and sorted by FPR."""
 
-
-"""
-this is with interpolation
-"""
-# def _save_cumulative_roc(fold_roc_curves, output_dir, k):
-#     """Mean ROC across folds with ±1 std band (reuses per-fold FPR/TPR arrays)."""
-#     fpr_grid = np.linspace(0, 1, 1000)
-#     tpr_interp, aucs = [], []
-
-#     for roc in fold_roc_curves:
-#         fpr, tpr = roc['fpr'], roc['tpr']
-#         if len(fpr) == 0:
-#             continue
-#         aucs.append(roc['auc'])
-#         tpr_interp.append(np.interp(fpr_grid, fpr, tpr))
-
-#     if not tpr_interp:
-#         return None
-
-#     tpr_interp = np.asarray(tpr_interp)
-#     mean_tpr = tpr_interp.mean(axis=0)
-#     std_tpr = tpr_interp.std(axis=0)
-#     mean_auc = float(np.mean(aucs))
-
-#     plt.figure(figsize=(6, 6))
-#     plt.plot(fpr_grid, mean_tpr, label=f'ROC Curve (AUC = {mean_auc:.3f})')
-#     plt.fill_between(fpr_grid, mean_tpr - std_tpr, mean_tpr + std_tpr, alpha=0.2)
-#     plt.plot([0, 1], [0, 1], linestyle='--', color='k', alpha=0.5, linewidth=1)
-#     plt.xlabel('False Positive Rate', fontsize=12)
-#     plt.ylabel('True Positive Rate', fontsize=12)
-#     plt.title(f'ROC Curve ({k}-fold CV)', fontsize=13)
-#     plt.legend()
-#     plt.xlim(0, 1)
-#     plt.ylim(0, 1)
-#     plt.tick_params(axis='both', which='major', labelsize=12)
-#     plt.tight_layout()
-#     path = os.path.join(output_dir, 'ROC curve interpolation.png')
-#     plt.savefig(path, dpi=300, bbox_inches='tight')
-#     plt.close()
-
-#     return {
-#         'fpr_grid': fpr_grid,
-#         'mean_tpr': mean_tpr,
-#         'std_tpr': std_tpr,
-#         'mean_auc': mean_auc,
-#         'fold_aucs': aucs,
-#         'path': path,
-#     }
-
-
-
-"""
-this is with mapping and creating bins
-"""
-def _save_cumulative_roc(fold_roc_curves, output_dir, k):
-    """Mean ROC across folds using FPR bins (no interpolation)."""
-
-    n_bins = 60
-    fpr_grid = np.linspace(0, 1, n_bins)
-    aucs = []
-
-    fold_binned_tprs = []
-
-    # we map the fpr to the bins and then we average all the tpr values for a particular bin for a fold 
-    # then we do the second averaging across folds for a particular bin
-
-    for roc in fold_roc_curves:
-        fpr = roc["fpr"]
-        tpr = roc["tpr"]
-
-        if len(fpr) == 0:
-            continue
-
-        aucs.append(roc["auc"])
-
-        # Store TPR values belonging to each FPR bin
-        bins = [[] for _ in range(n_bins)]
-
-        # One pass over the ROC points
-        for f, t in zip(fpr, tpr):
-            idx = min(int(f * (n_bins - 1)), n_bins - 1)
-            bins[idx].append(t)
-
-        # Average TPR inside each bin
-        binned_tpr = np.full(n_bins, np.nan)
-
-        for i, values in enumerate(bins):
-            if values:
-                binned_tpr[i] = np.mean(values)
-
-        fold_binned_tprs.append(binned_tpr)
-
-    if not fold_binned_tprs:
-        return None
-
-    fold_binned_tprs = np.asarray(fold_binned_tprs)
-
-    # Number of folds contributing to each FPR bin
-    counts = np.sum(~np.isnan(fold_binned_tprs), axis=0)
-
-    mean_tpr = np.nanmean(fold_binned_tprs, axis=0)
-    std_tpr = np.nanstd(fold_binned_tprs, axis=0)
-
-    # Ignore bins containing values from only one fold
-    mean_tpr[counts <= 1] = np.nan
-    std_tpr[counts <= 1] = np.nan
-
-    mean_auc = float(np.mean(aucs))
+    labels_cumulative = np.array([])
+    probs_cumulative = np.array([])
+    
+    for fold_label in labels:
+        labels_cumulative = np.append(labels_cumulative,fold_label)
+        
+    for prob in probs:    
+        probs_cumulative = np.append(probs_cumulative,prob)
+    
+    result = _compute_roc_curve(labels_cumulative, probs_cumulative)
+    fpr = result['fpr']
+    tpr = result['tpr']
+    auc = result['auc']
 
     plt.figure(figsize=(6, 6))
-
-    plt.plot(
-        fpr_grid,
-        mean_tpr,
-        label=f"ROC Curve (AUC = {mean_auc:.3f})",
-    )
-
-    plt.fill_between(
-        fpr_grid,
-        mean_tpr - std_tpr,
-        mean_tpr + std_tpr,
-        alpha=0.2,
-    )
-
-    plt.plot(
-        [0, 1],
-        [0, 1],
-        linestyle="--",
-        color="k",
-        alpha=0.5,
-        linewidth=1,
-    )
-
+    plt.plot(fpr, tpr, label=f"ROC Curve (AUC = {auc:.3f})")
+    plt.plot([0, 1], [0, 1], linestyle="--", color="k", alpha=0.5, linewidth=1)
     plt.xlabel("False Positive Rate", fontsize=12)
     plt.ylabel("True Positive Rate", fontsize=12)
     plt.title(f"ROC Curve ({k}-fold CV)", fontsize=13)
@@ -656,304 +498,63 @@ def _save_cumulative_roc(fold_roc_curves, output_dir, k):
     plt.tick_params(axis="both", which="major", labelsize=12)
     plt.tight_layout()
 
-    path = os.path.join(output_dir, "ROC curve binning.png")
-
+    path = os.path.join(output_dir, "ROC curve cumulative probability.png")
     plt.savefig(path, dpi=300, bbox_inches="tight")
-    # plt.show()
-
+    
     return {
-        "fpr_grid": fpr_grid,
-        "mean_tpr": mean_tpr,
-        "std_tpr": std_tpr,
-        "mean_auc": mean_auc,
-        "fold_aucs": aucs,
-        "path": path,
+        "result": result
     }
     
     
+
+def _save_cumulative_pr_added(labels, probs, output_dir, k):
+    """
+    PR from all fold (recall, precision) points concatenated and sorted by recall.
+    """
+  
+    labels_cumulative = np.array([])
+    probs_cumulative = np.array([])
     
-"""
-this is with everything added 
-"""
-# def _save_cumulative_roc(fold_roc_curves, output_dir, k):
-#     """Mean ROC across folds using FPR bins (no interpolation)."""
-
-#     aucs = np.array([])
-#     fold_binned_tprs = np.array([])
-#     fpr_grid = np.array([])
-
-#     for roc in fold_roc_curves:
-#         fpr = roc["fpr"]
-#         tpr = roc["tpr"]
-
-#         if len(fpr) == 0:
-#             continue
-
-#         aucs = np.append(aucs,roc["auc"])
-#         fold_binned_tprs = np.append(fold_binned_tprs,tpr)
-#         fpr_grid = np.append(fpr_grid,fpr)
-
-#     if not fold_binned_tprs.any():
-#         return None
-
-#     mean_auc = float(np.mean(aucs))
-
-#     plt.figure(figsize=(6, 6))
-
-#     plt.plot(
-#         fpr_grid,
-#         fold_binned_tprs,
-#         label=f"ROC Curve (AUC = {mean_auc:.3f})",
-#     )
-
-#     plt.plot(
-#         [0, 1],
-#         [0, 1],
-#         linestyle="--",
-#         color="k",
-#         alpha=0.5,
-#         linewidth=1,
-#     )
-
-#     plt.xlabel("False Positive Rate", fontsize=12)
-#     plt.ylabel("True Positive Rate", fontsize=12)
-#     plt.title(f"ROC Curve ({k}-fold CV)", fontsize=13)
-#     plt.legend(fontsize=11)
-#     plt.xlim(0, 1)
-#     plt.ylim(0, 1)
-#     plt.tick_params(axis="both", which="major", labelsize=12)
-#     plt.tight_layout()
-
-#     path = os.path.join(output_dir, "ROC curve cumulative probability.png")
-
-#     plt.savefig(path, dpi=300, bbox_inches="tight")
-#     # plt.show()
-
-#     return {
-#         "fpr_grid": fpr_grid,
-#         "mean_auc": mean_auc,
-#         "fold_aucs": aucs,
-#         "path": path,
-#     }
+    for fold_label in labels:
+        labels_cumulative = np.append(labels_cumulative,fold_label)
+        
+    for prob in probs:    
+        probs_cumulative = np.append(probs_cumulative,prob)
     
+    result = _compute_pr_curve(labels_cumulative, probs_cumulative)
+    precision = result['precision']
+    recall = result['recall']
+    prevalence = result['prevalence']
+    average_precision = result['average_precision']
     
-    
-    
-    
-    
-
-"""
-this is with interpolation
-"""
-# def _save_cumulative_pr(fold_pr_curves, output_dir, k):
-#     """Mean PR across folds with ±1 std band (reuses per-fold precision/recall arrays)."""
-#     recall_grid = np.linspace(0, 1, 100)
-#     precision_interp, average_precisions = [], []
-
-#     sum_length = sum( [fd['length'] for fd in fold_pr_curves])
-#     weighted_prevalence = sum([  (fd['prevalence']*fd['length'])/sum_length for fd in fold_pr_curves])
-
-#     for pr in fold_pr_curves:
-#         precision, recall = pr['precision'], pr['recall']
-#         average_precisions.append(pr['average_precision'])
-#         precision_interp.append(np.interp(recall_grid, recall[::-1], precision[::-1]))
-
-#     if not precision_interp:
-#         return None
-
-#     precision_interp = np.asarray(precision_interp)
-#     mean_precision = precision_interp.mean(axis=0)
-#     std_precision = precision_interp.std(axis=0)
-#     mean_ap = float(np.mean(average_precisions))
-
-#     plt.figure(figsize=(6, 6))
-#     plt.plot(recall_grid, mean_precision, label=f'PR Curve (AUPRC = {mean_ap:.3f})')
-#     plt.fill_between(
-#         recall_grid,
-#         mean_precision - std_precision,
-#         mean_precision + std_precision,
-#         alpha=0.2,
-#     )
-#     plt.xlabel('Recall', fontsize=12)
-#     plt.ylabel('Precision', fontsize=12)
-#     plt.title(f'Precision/Recall Curve ({k}-fold CV)', fontsize=13)
-#     plt.axhline(weighted_prevalence, color='gray', linestyle='--', label=f'Baseline(prevalence) ({weighted_prevalence:.3f})')
-#     plt.legend(fontsize=11)
-#     plt.xlim(0, 1)
-#     plt.ylim(0, 1)
-#     plt.tick_params(axis='both', which='major', labelsize=12)
-#     plt.tight_layout()
-#     path = os.path.join(output_dir, 'PR curve interpolation.png')
-#     plt.savefig(path, dpi=300, bbox_inches='tight')
-#     plt.close()
-
-#     return {
-#         'recall_grid': recall_grid,
-#         'mean_precision': mean_precision,
-#         'std_precision': std_precision,
-#         'mean_ap': mean_ap,
-#         'fold_aps': average_precisions,
-#         'path': path,
-#     }
-
-
-
-"""
-this is with mapping and creating bins
-"""
-def _save_cumulative_pr(fold_pr_curves, output_dir,k):
-    """Mean PR across folds using recall bins (no interpolation)."""
-
-    n_bins = 150
-    recall_grid = np.linspace(0, 1, n_bins)
-    average_precisions = []
-
-
-    # we map the fpr to the bins and then we average all the tpr values for a particular bin for a fold 
-    # then we do the second averaging across folds for a particular bin
-    
-    
-
-    sum_length = sum( [fd['length'] for fd in fold_pr_curves])
-    weighted_prevalence = sum([  (fd['prevalence']*fd['length'])/sum_length for fd in fold_pr_curves])
-    
-    fold_binned_precisions = []
-
-    for pr in fold_pr_curves:
-        precision = pr["precision"]
-        recall = pr["recall"]
-
-        average_precisions.append(pr["average_precision"])
-
-        # Store precision values belonging to each recall bin
-        bins = [[] for _ in range(n_bins)]
-
-        # One pass over the PR points
-        for r, p in zip(recall, precision):
-            idx = min(int(r * (n_bins - 1)), n_bins - 1)
-            bins[idx].append(p)
-
-        # Average precision inside each bin
-        binned_precision = np.full(n_bins, np.nan)
-        for i, values in enumerate(bins):
-            if values:
-                binned_precision[i] = np.mean(values)
-
-        fold_binned_precisions.append(binned_precision)
-
-    if not fold_binned_precisions:
-        return None
-
-    fold_binned_precisions = np.asarray(fold_binned_precisions)
-
-    counts = np.sum(~np.isnan(fold_binned_precisions), axis=0)
-
-    mean_precision = np.nanmean(fold_binned_precisions, axis=0)
-    std_precision = np.nanstd(fold_binned_precisions, axis=0)
-
-    # Ignore bins with values from only one fold
-    mean_precision[counts <= 1] = np.nan
-    std_precision[counts <= 1] = np.nan
-
-    mean_ap = float(np.mean(average_precisions))
-
     plt.figure(figsize=(6, 6))
-    plt.plot(recall_grid, mean_precision,
-             label=f"PR Curve (AUPRC = {mean_ap:.3f})")
-    plt.fill_between(
-        recall_grid,
-        mean_precision - std_precision,
-        mean_precision + std_precision,
-        alpha=0.2,
-    )
-
+    plt.plot(recall, precision, alpha=0.4, label=f"PR Curve (AUPRC = {average_precision :.3f})")
+    
+    i_80 = np.argmin(np.abs(recall - 0.8))
+    precision_at_80_recall = float(precision[i_80])
+    
+    plt.axvline(0.8, color='C3', linestyle=':', linewidth=1.5, alpha=0.85)
+    plt.plot( recall[i_80], precision_at_80_recall, 'o', color='C3', markersize=8, label=f'Precision @ ~80% recall = {precision_at_80_recall:.3f}')
     plt.xlabel("Recall", fontsize=12)
     plt.ylabel("Precision", fontsize=12)
     plt.title(f"Precision/Recall Curve ({k}-fold CV)", fontsize=13)
-    plt.axhline(weighted_prevalence, color='gray', linestyle='--', label=f'Baseline(prevalence) ({weighted_prevalence:.3f})')
+    plt.axhline(prevalence, color='gray', linestyle='--', label=f'Baseline(prevalence) ({prevalence:.3f})')
     plt.legend(fontsize=11)
     plt.xlim(0, 1)
     plt.ylim(0, 1)
     plt.tick_params(axis="both", which="major", labelsize=12)
     plt.tight_layout()
 
-    path = os.path.join(output_dir, "PR curve binning.png")
+    path = os.path.join(output_dir, "PR curve cumulative probability.png")
     plt.savefig(path, dpi=300, bbox_inches="tight")
-    # plt.show()
-
+    
     return {
-        "recall_grid": recall_grid,
-        "mean_precision": mean_precision,
-        "std_precision": std_precision,
-        "mean_ap": mean_ap,
-        "fold_aps": average_precisions,
-        "path": path,
+        "result": result,
+        "threshold": i_80,
     }
     
     
-    
-    
 
-
-"""
-this is with everything added
-"""
-# def _save_cumulative_pr(fold_pr_curves, output_dir,k):
-#     """Mean PR across folds using recall bins (no interpolation)."""
-
-#     average_precisions =  np.array([])
-#     recall_grid = np.array([])
-#     fold_binned_precisions =  np.array([])
-
-#     # we map the fpr to the bins and then we average all the tpr values for a particular bin for a fold 
-#     # then we do the second averaging across folds for a particular bin
-
-#     sum_length = sum( [fd['length'] for fd in fold_pr_curves])
-#     weighted_prevalence = sum([  (fd['prevalence']*fd['length'])/sum_length for fd in fold_pr_curves])
-        
-#     for pr in fold_pr_curves:
-#         precision = pr["precision"]
-#         recall = pr["recall"]
-        
-#         average_precisions = np.append(average_precisions,pr["average_precision"])
-#         recall_grid = np.append(recall_grid,recall)
-#         fold_binned_precisions = np.append(fold_binned_precisions,precision)
-
-#     if not fold_binned_precisions.any():
-#         return None
-
-#     mean_ap = float(np.mean(average_precisions))
-
-#     idx = np.argsort(recall_grid)
-#     recall_grid = recall_grid[idx]
-#     fold_binned_precisions = fold_binned_precisions[idx]
-    
-#     plt.figure(figsize=(6, 6))
-#     plt.plot(recall_grid, fold_binned_precisions, alpha=0.4,
-#              label=f"PR Curve (AUPRC = {mean_ap:.3f})")
-
-#     plt.xlabel("Recall", fontsize=12)
-#     plt.ylabel("Precision", fontsize=12)
-#     plt.title(f"Precision/Recall Curve ({k}-fold CV)", fontsize=13)
-#     plt.axhline(weighted_prevalence, color='gray', linestyle='--', label=f'Baseline(prevalence) ({weighted_prevalence:.3f})')
-#     plt.legend(fontsize=11)
-#     plt.xlim(0, 1)
-#     plt.ylim(0, 1)
-#     plt.tick_params(axis="both", which="major", labelsize=12)
-#     plt.tight_layout()
-
-
-#     path = os.path.join(output_dir, "PR curve cumulative probability.png")
-#     plt.savefig(path, dpi=300, bbox_inches="tight")
-#     # plt.show()
-
-#     return {
-#         "recall_grid": recall_grid,
-#         "mean_ap": mean_ap,
-#         "fold_aps": average_precisions,
-#         "path": path,
-#     }
-    
     
 def _save_fold_probabilities(y_true_folds, y_score_folds, fold_pr_curves, fold_roc_curves, output_dir, k):
     """Persist per-fold validation outputs and precomputed curve arrays."""
@@ -970,20 +571,7 @@ def _save_fold_probabilities(y_true_folds, y_score_folds, fold_pr_curves, fold_r
     return fold_probabilities, path
 
 
-def k_fold_cv(
-    embeddings,
-    labels,
-    baby_ids,
-    k=5,
-    epochs=50,
-    batch_size=32,
-    lr=0.001,
-    device='cpu',
-    use_focal_loss=True,
-    alpha=None,
-    gamma=2.0,
-    output_dir=None,
-):
+def k_fold_cv(embeddings, labels, baby_ids, k=5, epochs=50, batch_size=32, lr=0.001, device='cpu', use_focal_loss=True, alpha=None, gamma=2.0, output_dir=None,):
     if len(embeddings) == 0:
         print('No embeddings to train on!')
         return None, None, None, None, None, None
@@ -1021,7 +609,6 @@ def k_fold_cv(
 
     fold_metrics, fold_curve_data = [], []
     fold_y_true, fold_y_probs = [], []
-    fold_confusion_matrices = []
 
     for fold, (train_idx, val_idx) in enumerate(split_iter):
         if baby_ids is not None:
@@ -1032,31 +619,11 @@ def k_fold_cv(
 
         print(f'Fold {fold + 1}/{k}...', end=' ')
 
-        train_dataset = EmbeddingDataset(
-            embedding_matrix[train_idx],
-            labels[train_idx],
-        )
+        train_dataset = EmbeddingDataset( embedding_matrix[train_idx], labels[train_idx])
+        batch_sampler = UniformClassBatchSampler(labels=labels[train_idx], batch_size=batch_size)
 
-        batch_sampler = UniformClassBatchSampler(
-            labels=labels[train_idx],
-            batch_size=batch_size,
-        )
-
-        train_loader = DataLoader(
-            train_dataset,
-            batch_sampler=batch_sampler,
-        )
-
-        # train_loader = DataLoader(
-        #     EmbeddingDataset(embedding_matrix[train_idx], labels[train_idx]),
-        #     batch_size=batch_size,
-        #     shuffle=True,
-        # )
-
-        val_loader = DataLoader(
-            EmbeddingDataset(embedding_matrix[val_idx], labels[val_idx]),
-            batch_size=batch_size,
-        )
+        train_loader = DataLoader(train_dataset, batch_sampler=batch_sampler)
+        val_loader = DataLoader( EmbeddingDataset(embedding_matrix[val_idx], labels[val_idx]), batch_size=batch_size)
 
         train_pos_rate = labels[train_idx].mean()
         model = Classifier(dim, positive_ratio=train_pos_rate).to(device)
@@ -1066,22 +633,10 @@ def k_fold_cv(
         train_interval_losses = []
 
         for epoch in range(1, epochs + 1):
-            train_losses.append(
-                _run_epoch(
-                    model,
-                    train_loader,
-                    device,
-                    optimizer,
-                    use_focal_loss,
-                    alpha,
-                    gamma,
-                    train_interval_losses,
-                )
-            )
+            train_losses.append(_run_epoch( model, train_loader, device, optimizer, use_focal_loss, alpha, gamma, train_interval_losses))
+            
             if epoch % 5 == 0:
-                val_losses.append(
-                    _run_epoch(model, val_loader, device, None, use_focal_loss, alpha, gamma)
-                )
+                val_losses.append(_run_epoch(model, val_loader, device, None, use_focal_loss, alpha, gamma))
                 val_epochs.append(epoch)
 
         # One full val pass after training (final epoch weights). Same labels/probs as metrics.
@@ -1093,7 +648,6 @@ def k_fold_cv(
 
         val_preds = _predictions_from_probs(val_result['probs'])
         fold_cm = _confusion_matrix_counts(val_result['labels'], val_preds)
-        fold_confusion_matrices.append(fold_cm)
 
         pr_curve = _compute_pr_curve(val_result['labels'], val_result['probs'])
         roc_curve_data = _compute_roc_curve(val_result['labels'], val_result['probs'])
@@ -1107,19 +661,17 @@ def k_fold_cv(
             'roc_curve': roc_curve_data,
         }
 
+
         if output_dir:
             prefix = os.path.join(output_dir, f'fold_{fold + 1}')
             _save_loss_curve(train_losses, val_losses, val_epochs, f'{prefix}_loss.png')
             _save_interval_loss_curve(train_interval_losses, f'{prefix}_interval_loss.png')
             _plot_pr_curve(pr_curve, f'{prefix}_pr.png')
             _plot_roc_curve(roc_curve_data, f'{prefix}_roc.png')
-            _save_confusion_matrix_plot(
-                fold_cm,
-                f'{prefix}_confusion_matrix.png',
-                title=f'Fold {fold + 1} validation confusion matrix (threshold={DECISION_THRESHOLD})',
-            )
+            _save_confusion_matrix_plot(fold_cm, f'{prefix}_confusion_matrix.png', title=f'Fold {fold + 1} validation confusion matrix (threshold={DECISION_THRESHOLD})')
 
         fold_curve_data.append(curve_data)
+        
         print(
             f"F1={metrics['f1']:.3f} | Recall={metrics['recall']:.3f} | "
             f"AP={metrics['average_precision']:.3f} | AUC={metrics['auc']:.3f} "
@@ -1136,16 +688,16 @@ def k_fold_cv(
     if output_dir and fold_curve_data:
         fold_pr_curves = [fd['pr_curve'] for fd in fold_curve_data]
         fold_roc_curves = [fd['roc_curve'] for fd in fold_curve_data]
-
-        cumulative_curves['roc'] = _save_cumulative_roc(fold_roc_curves, output_dir, k)
-        cumulative_curves['pr'] = _save_cumulative_pr(fold_pr_curves, output_dir, k)
-        cumulative_curves['confusion_matrix'] = _save_cumulative_confusion_matrix(
-            fold_confusion_matrices, output_dir, k
-        )
-        cumulative_curves['loss'] = _save_cumulative_loss_curve(fold_curve_data, output_dir, k)
+        
         fold_probabilities, fold_probabilities_path = _save_fold_probabilities(
             fold_y_true, fold_y_probs, fold_pr_curves, fold_roc_curves, output_dir, k
         )
+
+        cumulative_curves['roc'] = _save_cumulative_roc_added(fold_probabilities['y_true_folds'],fold_probabilities['y_score_folds'], output_dir, k)
+        cumulative_curves['pr'] = _save_cumulative_pr_added(fold_probabilities['y_true_folds'],fold_probabilities['y_score_folds'], output_dir, k)
+        _save_cumulative_confusion_matrix(fold_probabilities['y_true_folds'], fold_probabilities['y_score_folds'], output_dir, cumulative_curves['pr']['threshold'])
+        cumulative_curves['loss'] = _save_cumulative_loss_curve(fold_curve_data, output_dir, k)
+
         print(f'\nSaved cumulative ROC: {cumulative_curves["roc"]["path"]}')
         print(f'Saved cumulative PR:  {cumulative_curves["pr"]["path"]}')
         print(f'Saved cumulative CM:  {cumulative_curves["confusion_matrix"]["path"]}')
@@ -1216,32 +768,3 @@ def train_and_save_results(
     print(f'Saved curves: {output_dir}/')
 
     return avg, std, fold_metrics
-
-
-# * alpha controls class importance.
-# * gamma controls easy versus difficult example importance.
-
-
-# Precision: Of everything the model predicted as positive, what fraction was actually positive?
-# Recall: Of all the samples that were actually positive, what fraction did the model correctly identify?
-# recall decreases or stays the same 
-# precision can increase or decrease
-
-
-# An ROC curve shows how a model's performance changes across classification thresholds.
-#  The ROC curve plots TPR against FPR at different thresholds. 
-# * True Positive Rate (Recall): Of all actual positives, how many did the model detect?
-# \text{TPR}=\frac{TP}{TP+FN}
-# * False Positive Rate: Of all actual negatives, how many were incorrectly predicted as positive?
-# \text{FPR}=\frac{FP}{FP+TN}
-# basically it comaprares how the model says the no of positives across the two classes. this helps is learn if the 
-# model is learning soemthign abotu the class specifically or not, whether it is able to distinguish or not
-
-
-# explore class balance among k folds...there may be too less label 1 examples in one of the folds, because 
-# of which everything is being predicted as label 0.
-# see if there is some seed , whcih ensires that experiemnts are repeorducible, since we are getting same results every time
-# we store the validation values after every 5 epochs sicne we need to see that the model generalizes...it may be susscpetibrl, to the trainign data, so we do it over a longer no of epochs
-# we store the loss and the val loss curve, since we need to see how the model is learning and not just overfitting.
-# Precision–Recall is centered mainly on the positive class
-# ROC looks at performance across both sides
