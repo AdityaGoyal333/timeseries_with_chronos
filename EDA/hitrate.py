@@ -113,8 +113,7 @@ def analyze_coverage_vectorized(all_timestamps, results, wsize, final_arr, birth
 
     # return list(record_timestamps)
     
-    
-    
+
     
     
 def analyze_baby_window_coverage(mat_file_path, window_sizes,optimized,debug_output=False):

@@ -332,13 +332,14 @@ def _compute_pr_curve(labels, probs):
             'prevalence': prevalence,
         }
 
-    precision, recall, _ = precision_recall_curve(labels, probs)
+    precision, recall, thresholds = precision_recall_curve(labels, probs)
     return {
-        'precision': precision,
-        'recall': recall,
+        'precision': precision[:-1],
+        'recall': recall[:-1],
         'average_precision': float(average_precision_score(labels, probs)),
         'prevalence': prevalence,
-        'length': len(labels)
+        'length': len(labels),
+        'thresholds': thresholds
     }
 
 
@@ -468,6 +469,11 @@ def _save_cumulative_confusion_matrix(labels, probs, output_dir, threshold):
     path = os.path.join(output_dir, "confusion_matrix.png")
     _save_confusion_matrix_plot(fold_cm, path, title=f'Cumulative confusion matrix (threshold={threshold})')
     
+    return {
+        "path": path,
+        "counts": fold_cm
+    }
+    
     
 def _save_cumulative_roc_added(labels, probs, output_dir, k):
     """ROC from all fold (fpr, tpr) points concatenated and sorted by FPR."""
@@ -502,7 +508,8 @@ def _save_cumulative_roc_added(labels, probs, output_dir, k):
     plt.savefig(path, dpi=300, bbox_inches="tight")
     
     return {
-        "result": result
+        "result": result,
+        "path": path
     }
     
     
@@ -526,12 +533,14 @@ def _save_cumulative_pr_added(labels, probs, output_dir, k):
     recall = result['recall']
     prevalence = result['prevalence']
     average_precision = result['average_precision']
+    thresholds = result['thresholds']
     
     plt.figure(figsize=(6, 6))
     plt.plot(recall, precision, alpha=0.4, label=f"PR Curve (AUPRC = {average_precision :.3f})")
     
     i_80 = np.argmin(np.abs(recall - 0.8))
     precision_at_80_recall = float(precision[i_80])
+    prob_threshold_80 = thresholds[i_80]
     
     plt.axvline(0.8, color='C3', linestyle=':', linewidth=1.5, alpha=0.85)
     plt.plot( recall[i_80], precision_at_80_recall, 'o', color='C3', markersize=8, label=f'Precision @ ~80% recall = {precision_at_80_recall:.3f}')
@@ -550,7 +559,8 @@ def _save_cumulative_pr_added(labels, probs, output_dir, k):
     
     return {
         "result": result,
-        "threshold": i_80,
+        "threshold": prob_threshold_80,
+        "path" : path
     }
     
     
@@ -695,7 +705,7 @@ def k_fold_cv(embeddings, labels, baby_ids, k=5, epochs=50, batch_size=32, lr=0.
 
         cumulative_curves['roc'] = _save_cumulative_roc_added(fold_probabilities['y_true_folds'],fold_probabilities['y_score_folds'], output_dir, k)
         cumulative_curves['pr'] = _save_cumulative_pr_added(fold_probabilities['y_true_folds'],fold_probabilities['y_score_folds'], output_dir, k)
-        _save_cumulative_confusion_matrix(fold_probabilities['y_true_folds'], fold_probabilities['y_score_folds'], output_dir, cumulative_curves['pr']['threshold'])
+        cumulative_curves['confusion_matrix'] = _save_cumulative_confusion_matrix(fold_probabilities['y_true_folds'], fold_probabilities['y_score_folds'], output_dir, cumulative_curves['pr']['threshold'])
         cumulative_curves['loss'] = _save_cumulative_loss_curve(fold_curve_data, output_dir, k)
 
         print(f'\nSaved cumulative ROC: {cumulative_curves["roc"]["path"]}')

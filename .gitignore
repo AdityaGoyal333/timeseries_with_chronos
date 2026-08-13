@@ -14,3 +14,4 @@ experiment_files/*focal
 /docs
 /EDA/plots
 *.pkl
+*.parquet
