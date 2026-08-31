@@ -8,44 +8,90 @@ Step 3:  Run Amazon Chronos-2 on each unique sampled window → fixed-size
 Step 4:  For each death-proximity threshold, pair cached embeddings with
          their threshold-specific labels → ready for classifier training.
 
-Two-file design
----------------
-embeddings_cache.pkl   —  large dict: window_key → embedding vector
-labels_{N}d.pkl        —  small file: list of keys + labels for one threshold
-
-Storing keys instead of duplicating embeddings saves disk space because
-the same embedding is reused across all thresholds.
+Binning modes (see constants.BINNING_*):
+  seasonal      — 960 × 300s equal bins
+  fine_grained  — 960 geometric bins (15 min → 1 min), separate cache file
 """
 
 import os
 import pickle as pl
 from pathlib import Path
+
 import numpy as np
 import pandas as pd
-from chronos import Chronos2Pipeline
-import torch
 import scipy.io
+import torch
+from chronos import Chronos2Pipeline
 
 from constants import (
+    BINNING_FINE_GRAINED,
+    BINNING_SEASONAL,
     CONTEXT_SIZE_SECONDS,
-    WINDOW_SIZE_SECONDS
+    EMBEDDINGS_CACHE_PATHS,
+    FINE_GRAINED_MAX_BIN_SECONDS,
+    FINE_GRAINED_MIN_BIN_SECONDS,
+    FINE_GRAINED_OUTPUT_SUFFIX,
+    MISSING_WINDOWS_PATHS,
+    NUM_WINDOWS,
+    WINDOW_SIZE_SECONDS,
 )
-
-
+from log_utils import tprint
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = (BASE_DIR / "data").resolve()
-MISSING_WINDOWS_PATH = (DATA_DIR / 'windows_missing_embeddings.pkl').resolve()
-EMBEDDINGS_CACHE_PATH = (DATA_DIR / 'embeddings_global.pkl').resolve()
 
+# Computed once; 960 integer widths summing to CONTEXT_SIZE_SECONDS
+_fine_grained_bin_widths = None
+
+
+def output_suffix(binning_mode):
+    """Filename suffix for labels/results when using fine-grained binning."""
+    if binning_mode == BINNING_FINE_GRAINED:
+        return FINE_GRAINED_OUTPUT_SUFFIX
+    return ''
+
+
+def cache_paths(binning_mode):
+    """Return (embeddings_cache_path, missing_windows_path) for this binning mode."""
+    return (
+        (DATA_DIR / EMBEDDINGS_CACHE_PATHS[binning_mode]).resolve(),
+        (DATA_DIR / MISSING_WINDOWS_PATHS[binning_mode]).resolve(),
+    )
+
+
+def geometric_bin_widths(context_length, n_values, min_width, max_width):
+    """Build n_values bin widths (seconds) that sum exactly to context_length.
+
+    Widths follow a geometric progression from max_width (index 0, early in
+    the window) down to min_width (index n-1, late in the window).
+    """
+    ratio = (min_width / max_width) ** (1.0 / (n_values - 1))
+    weights = max_width * (ratio ** np.arange(n_values, dtype=float))
+    widths = weights / weights.sum() * context_length
+
+    floored = np.floor(widths).astype(int)
+    remainder = int(context_length - floored.sum())
+    # Distribute leftover seconds to bins with largest fractional parts
+    order = np.argsort(widths - floored)[::-1]
+    floored[order[:remainder]] += 1
+    return floored
+
+
+def get_fine_grained_bin_widths():
+    """Lazy-load the 960-bin geometric schedule (shared across all windows)."""
+    global _fine_grained_bin_widths
+    if _fine_grained_bin_widths is None:
+        _fine_grained_bin_widths = geometric_bin_widths(
+            CONTEXT_SIZE_SECONDS,
+            NUM_WINDOWS,
+            FINE_GRAINED_MIN_BIN_SECONDS,
+            FINE_GRAINED_MAX_BIN_SECONDS,
+        )
+    return _fine_grained_bin_widths
 
 
 def prepare_chronos_input(hr_windows, spo2_windows):
-    """Format HR + SpO2 sub-window arrays as Chronos-2 model input.
-
-    - NaN bins are filled with the channel mean (or 0 if all NaN).
-    - Returns a (2, 1, num_sub_windows) tensor: channel 0 = HR, channel 1 = SpO2.
-    """
+    """Format HR + SpO2 sub-window arrays as Chronos-2 model input."""
     hr_clean = np.where(
         np.isnan(hr_windows),
         np.nanmean(hr_windows) if not np.all(np.isnan(hr_windows)) else 0,
@@ -68,46 +114,30 @@ def get_chronos_embedding(chronos_input, pipeline):
     with torch.no_grad():
         embeddings, _ = pipeline.embed(chronos_input)
 
-    # Take the final time-step embedding from each channel
     hr_emb = embeddings[0][0][-1].float()
     spo2_emb = embeddings[1][0][-1].float()
     return torch.cat([hr_emb, spo2_emb], dim=0).cpu().numpy()
 
 
 def get_embedding(hr_windows, spo2_windows, pipeline):
-    """End-to-end: sub-window arrays → Chronos input → concatenated embedding vector."""
     chronos_input = prepare_chronos_input(hr_windows, spo2_windows)
     return get_chronos_embedding(chronos_input, pipeline)
 
+
 def extract_raw_timeseries(mat_file_path, start_time, context_size):
-    """Load HR and SpO2 samples from a .mat file within [start, start + context).
-
-    Args:
-        mat_file_path: Path to the baby's vital-sign .mat file.
-        start_time: Absolute window start (seconds, same units as vt).
-        context_size: Window length in seconds (typically CONTEXT_SIZE_SECONDS).
-
-    Returns:
-        Dict with filtered timestamps, HR, SpO2 arrays — or None if no valid data.
-    """
+    """Load HR and SpO2 samples from a .mat file within [start, start + context)."""
     try:
         mat_data = scipy.io.loadmat(mat_file_path)
     except Exception as e:
-        print(f"Error loading {mat_file_path}: {e}")
+        tprint(f"Error loading {mat_file_path}: {e}")
         return None
 
+    birth_time = mat_data['pdata'][0][1]
+    age_at_death = mat_data['pdata'][0][-1]
+    death_ts = age_at_death * 86400 if not np.isnan(age_at_death) else None
 
-    # ((birth_time+age_at_death)*86400 - vt)/86400 < threshold_days
-
-    birth_time = mat_data['pdata'][0][1]  # in days realtive to the global start time
-    age_at_death = mat_data['pdata'][0][-1]  # the age in days at death
-    death_ts = age_at_death * 86400 if not np.isnan(age_at_death) else None  # seconds since birth; None if alive  
-
-    # vdata columns: 0 = heart rate, 2 = SpO2 (column 1 is unused here)
     hr_cols = mat_data['vdata'][:, 0]
     spo2_cols = mat_data['vdata'][:, 2]
-
-    # vdata is seconds from birth time, not accounting the time of birth 
     timestamps = mat_data['vt'].flatten()
 
     end_time = start_time + context_size
@@ -133,28 +163,13 @@ def extract_raw_timeseries(mat_file_path, start_time, context_size):
     }
 
 
-def create_windowed_features_from_raw(raw_data, window_size):
-    """Aggregate raw samples into fixed-length sub-window averages for Chronos.
-
-    Divides the 80-hour context into NUM_WINDOWS bins (default 960 × 5 min).
-    Each bin gets the mean HR and mean SpO2 of all samples falling in it.
-    Bins with no samples remain NaN (filled later in prepare_chronos_input).
-    """
-    timestamps = raw_data['timestamps']
-    hr_raw = raw_data['hr_raw']
-    spo2_raw = raw_data['spo2_raw']
-    start_time = raw_data['start_time']
-    context_size = raw_data['context_size']
-
-    # Assign each sample to a sub-window index (0, 1, 2, …)
-    window_indices = np.floor((timestamps - start_time) / window_size).astype(int)
-    num_windows = int(np.ceil(context_size / window_size))
-
+def _aggregate_into_bins(timestamps, hr_raw, spo2_raw, start_time, num_windows, bin_idx):
+    """Mean HR/SpO2 per bin index; empty bins stay NaN."""
     hr_windows = np.full(num_windows, np.nan)
     spo2_windows = np.full(num_windows, np.nan)
 
     for idx in range(num_windows):
-        mask = window_indices == idx
+        mask = bin_idx == idx
         if np.any(mask):
             hr_windows[idx] = np.mean(hr_raw[mask])
             spo2_windows[idx] = np.mean(spo2_raw[mask])
@@ -162,43 +177,67 @@ def create_windowed_features_from_raw(raw_data, window_size):
     return hr_windows, spo2_windows
 
 
-def create_windowed_features(mat_file_path, start_time, context_size, window_size):
-    """Load .mat file and return (hr_windows, spo2_windows) sub-window arrays."""
+def create_windowed_features_from_raw(raw_data, binning_mode):
+    """Aggregate raw samples into 960 Chronos bins (seasonal or fine-grained)."""
+    timestamps = raw_data['timestamps']
+    hr_raw = raw_data['hr_raw']
+    spo2_raw = raw_data['spo2_raw']
+    start_time = raw_data['start_time']
+
+    if binning_mode == BINNING_SEASONAL:
+        window_indices = np.floor(
+            (timestamps - start_time) / WINDOW_SIZE_SECONDS
+        ).astype(int)
+        num_windows = int(np.ceil(raw_data['context_size'] / WINDOW_SIZE_SECONDS))
+        return _aggregate_into_bins(
+            timestamps, hr_raw, spo2_raw, start_time, num_windows, window_indices
+        )
+
+    # fine_grained: variable-width bins via cumulative edges
+    bin_widths = get_fine_grained_bin_widths()
+    num_windows = len(bin_widths)
+    edges = np.concatenate([[0], np.cumsum(bin_widths)])
+    rel = timestamps - start_time
+    bin_idx = np.searchsorted(edges, rel, side='right') - 1
+    in_range = (bin_idx >= 0) & (bin_idx < num_windows)
+    return _aggregate_into_bins(
+        timestamps[in_range],
+        hr_raw[in_range],
+        spo2_raw[in_range],
+        start_time,
+        num_windows,
+        bin_idx[in_range],
+    )
+
+
+def create_windowed_features(mat_file_path, start_time, context_size, binning_mode):
+    """Load .mat file and return (hr_windows, spo2_windows) for Chronos."""
     raw_data = extract_raw_timeseries(mat_file_path, start_time, context_size)
     if raw_data is None:
         return None
-    return create_windowed_features_from_raw(raw_data, window_size)
+    return create_windowed_features_from_raw(raw_data, binning_mode)
 
 
 def baby_id_from_window_key(key):
-    """Recover baby_id from cache key '{baby_id}_{start}_{end}'."""
     return key.rsplit('_', 2)[0]
 
 
 def create_window_key(mat_file, window_start, window_end):
-    """Unique cache key for one window: baby_id + start + end timestamps."""
     baby_id = mat_file.split('/')[-1].replace('.mat', '')
     return f"{baby_id}_{int(window_start)}_{int(window_end)}"
 
 
 def ensure_numpy_pickle_compat():
-    """Allow unpickling arrays saved with NumPy 2.x when running NumPy 1.x.
-
-    NumPy 2.x renamed the internal module from numpy.core to numpy._core.
-    Pickle files store the module path, so loading a 2.x pickle on 1.x fails
-    unless we alias the old module names.
-    """
     import sys
 
     try:
-        import numpy._core  # noqa: F401  — already on NumPy 2.x, nothing to do
+        import numpy._core  # noqa: F401
     except ModuleNotFoundError:
         import numpy.core as _core
 
         sys.modules.setdefault('numpy._core', _core)
         sys.modules.setdefault('numpy._core.multiarray', _core.multiarray)
         sys.modules.setdefault('numpy._core.umath', _core.umath)
-
 
 
 def load_pickle(path):
@@ -208,68 +247,50 @@ def load_pickle(path):
 
 
 def save_pickle(obj, path):
-    """Atomic write: save to .tmp first, then rename (avoids corrupt partial files)."""
     tmp_path = f'{path}.tmp'
     with open(tmp_path, 'wb') as f:
         pl.dump(obj, f)
     os.replace(tmp_path, path)
 
 
-def load_embeddings_cache():
-    """Load the global embedding dict, or an empty dict if none exists yet."""
-    if not os.path.exists(EMBEDDINGS_CACHE_PATH):
+def load_embeddings_cache(cache_path):
+    if not os.path.exists(cache_path):
         return {}
     try:
-        return load_pickle(EMBEDDINGS_CACHE_PATH)
+        return load_pickle(cache_path)
     except Exception as e:
-        # Common cause: cache pickled with NumPy 2.x, loaded with NumPy 1.x
         raise RuntimeError(
-            f"Failed to load {EMBEDDINGS_CACHE_PATH} ({os.path.getsize(EMBEDDINGS_CACHE_PATH) / 1e6:.0f} MB). "
-            "The cache was likely saved with a different NumPy version or is corrupted. "
-            "Try upgrading NumPy (>=2.0 if the file uses numpy._core), or delete the file and regenerate embeddings. "
+            f"Failed to load {cache_path} ({os.path.getsize(cache_path) / 1e6:.0f} MB). "
+            "Try upgrading NumPy (>=2.0 if the file uses numpy._core), or delete and regenerate. "
             f"Original error: {type(e).__name__}: {e}"
         ) from e
 
 
-def save_embeddings_cache(cache):
-    save_pickle(cache, EMBEDDINGS_CACHE_PATH)
+def save_embeddings_cache(cache, cache_path):
+    save_pickle(cache, cache_path)
 
 
 def detect_missing_windows(windows_df, cache):
-    """Return rows whose (mat_file, start, end) key is not in the cache.
-
-    Each window is uniquely identified by its source file + time bounds.
-    This lets us skip windows that were embedded in a previous run.
-    """
     missing_indices = []
     for idx, row in windows_df.iterrows():
         key = create_window_key(row['mat_file'], row['window_start'], row['window_end'])
         if key not in cache:
             missing_indices.append(idx)
     if not missing_indices:
-        return windows_df.iloc[0:0]  # empty DataFrame with same columns
+        return windows_df.iloc[0:0]
     return windows_df.loc[missing_indices]
 
 
-def generate_missing_embeddings(missing_df, cache, pipeline, save_every=500):
-    """Run Chronos on each missing window; checkpoint cache periodically.
-
-    For each window:
-      1. create_windowed_features() slices the 80-hour vital-sign segment
-         into smaller sub-windows for Chronos input.
-      2. get_embedding() runs the Chronos-2 model and returns a vector.
-      3. The vector is stored in cache under the window key.
-
-    Failures (bad data, OOM, etc.) are counted but do not stop the loop.
-    """
+def generate_missing_embeddings(missing_df, cache, pipeline, cache_path, binning_mode, save_every=500):
     total = len(missing_df)
     if total == 0:
         return cache
 
-    print("\n" + "=" * 80)
-    print(" " * 12 + "STEP 3b: GENERATING MISSING EMBEDDINGS")
-    print("=" * 80 + "\n")
-    print(f"Generating {total} missing embeddings (checkpoint every {save_every})...\n")
+    tprint("\n" + "=" * 80)
+    tprint(" " * 12 + "STEP 3b: GENERATING MISSING EMBEDDINGS")
+    tprint(f"  Binning: {binning_mode}")
+    tprint("=" * 80 + "\n")
+    tprint(f"Generating {total} missing embeddings (checkpoint every {save_every})...\n")
 
     initial_size = len(cache)
     generated = 0
@@ -279,106 +300,104 @@ def generate_missing_embeddings(missing_df, cache, pipeline, save_every=500):
     for i, (_, row) in enumerate(missing_df.iterrows()):
         key = create_window_key(row['mat_file'], row['window_start'], row['window_end'])
         try:
-            # Extract vital-sign features for this 80-hour window
             result = create_windowed_features(
                 row['mat_file'],
                 row['window_start'],
-                CONTEXT_SIZE_SECONDS,   # total context length (80 hours)
-                WINDOW_SIZE_SECONDS,    # sub-window size fed to Chronos
+                CONTEXT_SIZE_SECONDS,
+                binning_mode,
             )
             if result is not None:
-                # result = (feature_array, mask) → pass through Chronos-2
                 cache[key] = get_embedding(result[0], result[1], pipeline)
                 generated += 1
                 new_since_save += 1
             else:
-                failed += 1  # e.g. insufficient data in this time range
+                failed += 1
         except Exception:
             failed += 1
 
-        # Checkpoint every save_every new embeddings (embedding is expensive)
         if new_since_save >= save_every:
-            save_embeddings_cache(cache)
-            print(f"  💾 Checkpoint at {i + 1}/{total} (cache: {len(cache)}, +{new_since_save} new)")
+            save_embeddings_cache(cache, cache_path)
+            tprint(f"  💾 Checkpoint at {i + 1}/{total} (cache: {len(cache)}, +{new_since_save} new)")
             new_since_save = 0
 
         if (i + 1) % 100 == 0 or (i + 1) == total:
-            print(f"  Progress: {i + 1}/{total} | Generated: {generated}, Failed: {failed}")
+            tprint(f"  Progress: {i + 1}/{total} | Generated: {generated}, Failed: {failed}")
 
     if new_since_save > 0:
-        save_embeddings_cache(cache)
-        print(f"\n  💾 Final checkpoint ({new_since_save} new embeddings)")
+        save_embeddings_cache(cache, cache_path)
+        tprint(f"\n  💾 Final checkpoint ({new_since_save} new embeddings)")
 
-    print(f"\n{'=' * 80}")
-    print("✓ MISSING EMBEDDING GENERATION COMPLETE")
-    print(f"  Attempted: {total}")
-    print(f"  Generated: {generated}")
-    print(f"  Failed: {failed}")
-    print(f"  Global cache: {initial_size} → {len(cache)} (+{len(cache) - initial_size})")
-    print(f"{'=' * 80}\n")
+    tprint(f"\n{'=' * 80}")
+    tprint("✓ MISSING EMBEDDING GENERATION COMPLETE")
+    tprint(f"  Attempted: {total}")
+    tprint(f"  Generated: {generated}")
+    tprint(f"  Failed: {failed}")
+    tprint(f"  Global cache: {initial_size} → {len(cache)} (+{len(cache) - initial_size})")
+    tprint(f"{'=' * 80}\n")
 
     return cache
 
 
-def ensure_embeddings_for_windows(windows_df, save_every=500):
-    """Detect missing embeddings, generate them, and return the updated cache.
+def ensure_embeddings_for_windows(windows_df, binning_mode, save_every=500):
+    """Step 3 entry point: detect missing keys, embed, checkpoint incrementally."""
+    embeddings_path, missing_path = cache_paths(binning_mode)
 
-    This is the main Step 3 entry point. It is incremental: re-running after
-    a crash will only embed windows not already in the cache.
-    """
-    print("\n" + "=" * 80)
-    print(" " * 10 + "STEP 3: EMBEDDINGS (DETECT MISSING → GENERATE)")
-    print("=" * 80 + "\n")
+    tprint("\n" + "=" * 80)
+    tprint(" " * 10 + "STEP 3: EMBEDDINGS (DETECT MISSING → GENERATE)")
+    tprint(f"  Binning: {binning_mode}")
+    tprint(f"  Cache: {embeddings_path}")
+    tprint("=" * 80 + "\n")
 
-    cache = load_embeddings_cache()
+    cache = load_embeddings_cache(embeddings_path)
 
-    # --- Step 3a: figure out what's already done ---
-    print("STEP 3a: Detecting missing embeddings...")
+    tprint("STEP 3a: Detecting missing embeddings...")
     missing_df = detect_missing_windows(windows_df, cache)
     n_total = len(windows_df)
     n_missing = len(missing_df)
 
-    print(f"  ✓ Global cache: {len(cache)} embeddings")
-    print(f"  ✓ Windows required: {n_total}")
-    print(f"  ✓ Already in cache: {n_total - n_missing}")
-    print(f"  ✓ Missing: {n_missing}")
+    tprint(f"  ✓ Global cache: {len(cache)} embeddings")
+    tprint(f"  ✓ Windows required: {n_total}")
+    tprint(f"  ✓ Already in cache: {n_total - n_missing}")
+    tprint(f"  ✓ Missing: {n_missing}")
 
-    missing_df.to_pickle(MISSING_WINDOWS_PATH)
-    print(f"  ✓ Saved: {MISSING_WINDOWS_PATH}\n")
+    missing_df.to_pickle(missing_path)
+    tprint(f"  ✓ Saved: {missing_path}\n")
 
     if n_missing == 0:
-        print("✓ Nothing missing — skipping generation\n")
+        tprint("✓ Nothing missing — skipping generation\n")
         return cache
 
-    # Load Chronos-2 once and reuse for all missing windows
+    chronos_device = "cuda" if torch.cuda.is_available() else "cpu"
+    tprint(f"Chronos-2 device: {chronos_device}")
+
     pipeline = Chronos2Pipeline.from_pretrained(
         "amazon/chronos-2",
-        device_map="cpu",
+        device_map=chronos_device,
         dtype=torch.bfloat16,
     )
-    cache = generate_missing_embeddings(missing_df, cache, pipeline, save_every=save_every)
+    cache = generate_missing_embeddings(
+        missing_df, cache, pipeline, embeddings_path, binning_mode, save_every=save_every
+    )
 
-    # Sanity check: warn if any windows still couldn't be embedded
     still_missing = len(detect_missing_windows(windows_df, cache))
     if still_missing:
-        print(f"⚠ Warning: {still_missing} windows still missing after generation\n")
+        tprint(f"⚠ Warning: {still_missing} windows still missing after generation\n")
 
     return cache
 
 
-def prepare_training_data_for_threshold(threshold_days, samples_windows_path, embeddings_cache=None):
-    """Join labeled windows with cached embeddings for one threshold (Step 4).
+def prepare_training_data_for_threshold(
+    threshold_days, samples_windows_path, binning_mode, embeddings_cache=None
+):
+    """Join labeled windows with cached embeddings for one threshold (Step 4)."""
+    suffix = output_suffix(binning_mode)
+    labels_path = f'labels_{threshold_days}d{suffix}.pkl'
 
-    Reads the labeled data from Step 2, filters to one threshold, and
-    looks up each window's embedding in the global cache.
-
-    Windows whose embedding failed in Step 3 are silently skipped here,
-    so the final sample count may be slightly less than the labeled count.
-    """
-    print(f"\nPreparing {threshold_days}-day threshold...")
+    tprint(f"\nPreparing {threshold_days}-day threshold (binning={binning_mode})...")
 
     if embeddings_cache is None:
-        embeddings_cache = load_embeddings_cache()
+        embeddings_path, _ = cache_paths(binning_mode)
+        embeddings_cache = load_embeddings_cache(embeddings_path)
 
     sampled_all = pd.read_pickle(samples_windows_path)
     threshold_data = sampled_all[sampled_all['threshold_days'] == threshold_days]
@@ -394,37 +413,36 @@ def prepare_training_data_for_threshold(threshold_days, samples_windows_path, em
             labels.append(int(row['label']))
             baby_ids.append(baby_id_from_window_key(key))
 
-    print(f"  ✓ {len(embedding_keys)} samples (L0:{labels.count(0)}, L1:{labels.count(1)})")
-    print(f"  ✓ {len(set(baby_ids))} unique babies")
+    tprint(f"  ✓ {len(embedding_keys)} samples (L0:{labels.count(0)}, L1:{labels.count(1)})")
+    tprint(f"  ✓ {len(set(baby_ids))} unique babies")
 
-    # Save keys + labels + baby_ids; embeddings stay in the global cache
-    with open(f'labels_{threshold_days}d.pkl', 'wb') as f:
+    with open(labels_path, 'wb') as f:
         pl.dump({'embedding_keys': embedding_keys, 'labels': labels, 'baby_ids': baby_ids}, f)
 
-    print(f"  ✓ Saved: labels_{threshold_days}d.pkl (~{(len(embedding_keys) * 100) / 1024:.2f} KB)")
+    tprint(f"  ✓ Saved: {labels_path} (~{(len(embedding_keys) * 100) / 1024:.2f} KB)")
 
     embeddings = [embeddings_cache[key] for key in embedding_keys]
     return embeddings, labels, baby_ids
 
 
-def load_training_data_for_threshold(threshold_days):
-    """Reload a previously saved threshold's keys + labels and fetch embeddings.
+def load_training_data_for_threshold(threshold_days, binning_mode):
+    """Reload keys + labels and fetch embeddings from the cache for this binning mode."""
+    suffix = output_suffix(binning_mode)
+    labels_path = f'labels_{threshold_days}d{suffix}.pkl'
 
-    Use this to re-train without re-running Steps 1–4, as long as the
-    labels file and embeddings cache still exist.
-    """
-    print(f"\nLoading {threshold_days}-day threshold from saved files...")
+    tprint(f"\nLoading {threshold_days}-day threshold from {labels_path}...")
 
-    with open(f'labels_{threshold_days}d.pkl', 'rb') as f:
+    with open(labels_path, 'rb') as f:
         data = pl.load(f)
 
-    embeddings_cache = load_embeddings_cache()
+    embeddings_path, _ = cache_paths(binning_mode)
+    embeddings_cache = load_embeddings_cache(embeddings_path)
     embeddings = [embeddings_cache[key] for key in data['embedding_keys']]
     labels = data['labels']
     baby_ids = data.get('baby_ids')
     if baby_ids is None:
         baby_ids = [baby_id_from_window_key(key) for key in data['embedding_keys']]
 
-    print(f"  ✓ Loaded {len(embeddings)} samples (L0:{labels.count(0)}, L1:{labels.count(1)})")
-    print(f"  ✓ {len(set(baby_ids))} unique babies")
+    tprint(f"  ✓ Loaded {len(embeddings)} samples (L0:{labels.count(0)}, L1:{labels.count(1)})")
+    tprint(f"  ✓ {len(set(baby_ids))} unique babies")
     return embeddings, labels, baby_ids

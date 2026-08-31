@@ -26,6 +26,7 @@ from constants import (
     OVERLAP_PERCENTAGE_NICU,
     OVERLAP_PERCENTAGE_NON_NICU
 )
+from log_utils import tprint
 
 
 def generate_window_metadata_for_baby(mat_file_path, overlap_percentage, max_windows):
@@ -110,22 +111,22 @@ def generate_all_window_metadata(nicu_files, non_nicu_files):
     NICU and Non-NICU babies can use different overlap % and window caps
     because their recording lengths and class sizes differ.
     """
-    print("\n" + "=" * 80)
-    print(" " * 20 + "STEP 1: GENERATING WINDOW METADATA")
-    print(" " * 15 + "(Uniformly Spaced, Threshold-Independent)")
-    print("=" * 80 + "\n")
+    tprint("\n" + "=" * 80)
+    tprint(" " * 20 + "STEP 1: GENERATING WINDOW METADATA")
+    tprint(" " * 15 + "(Uniformly Spaced, Threshold-Independent)")
+    tprint("=" * 80 + "\n")
 
     all_metadata = []
 
     # --- Non-NICU babies (survivors) ---
-    print(f"Processing {len(non_nicu_files)} Non-NICU babies...")
-    print(f"  Overlap: {OVERLAP_PERCENTAGE_NON_NICU * 100:.0f}%")
-    print(f"  Max metadata windows: {MAX_METADATA_WINDOWS_NON_NICU}\n")
+    tprint(f"Processing {len(non_nicu_files)} Non-NICU babies...")
+    tprint(f"  Overlap: {OVERLAP_PERCENTAGE_NON_NICU * 100:.0f}%")
+    tprint(f"  Max metadata windows: {MAX_METADATA_WINDOWS_NON_NICU}\n")
 
     for i, file_path in enumerate(non_nicu_files):
         baby_id = file_path.split('/')[-1].replace('.mat', '')
         if (i + 1) % 20 == 0 or i + 1 == len(non_nicu_files):
-            print(f"  Progress: {i + 1}/{len(non_nicu_files)} babies")
+            tprint(f"  Progress: {i + 1}/{len(non_nicu_files)} babies")
         try:
             df = generate_window_metadata_for_baby(
                 file_path,
@@ -134,17 +135,17 @@ def generate_all_window_metadata(nicu_files, non_nicu_files):
             )
             all_metadata.append(df)  # empty DataFrame is fine — concat handles it
         except Exception as e:
-            print(f"  ✗ Error with baby {baby_id}: {e}")
+            tprint(f"  ✗ Error with baby {baby_id}: {e}")
 
     # --- NICU babies (deceased) ---
-    print(f"\nProcessing {len(nicu_files)} NICU babies...")
-    print(f"  Overlap: {OVERLAP_PERCENTAGE_NICU * 100:.0f}%")
-    print(f"  Max metadata windows: {MAX_METADATA_WINDOWS_NICU}\n")
+    tprint(f"\nProcessing {len(nicu_files)} NICU babies...")
+    tprint(f"  Overlap: {OVERLAP_PERCENTAGE_NICU * 100:.0f}%")
+    tprint(f"  Max metadata windows: {MAX_METADATA_WINDOWS_NICU}\n")
 
     for i, file_path in enumerate(nicu_files):
         baby_id = file_path.split('/')[-1].replace('.mat', '')
         if (i + 1) % 10 == 0 or i + 1 == len(nicu_files):
-            print(f"  Progress: {i + 1}/{len(nicu_files)} babies")
+            tprint(f"  Progress: {i + 1}/{len(nicu_files)} babies")
         try:
             df = generate_window_metadata_for_baby(
                 file_path,
@@ -153,14 +154,14 @@ def generate_all_window_metadata(nicu_files, non_nicu_files):
             )
             all_metadata.append(df)
         except Exception as e:
-            print(f"  ✗ Error with baby {baby_id}: {e}")
+            tprint(f"  ✗ Error with baby {baby_id}: {e}")
 
     metadata_df = pd.concat(all_metadata, ignore_index=True)
 
-    print(f"\n{'=' * 80}")
-    print(f"✓ Total metadata windows: {len(metadata_df)}")
-    print(f"  Non-NICU: {len(metadata_df[metadata_df['baby_type'] == 'NON_NICU'])}")
-    print(f"  NICU: {len(metadata_df[metadata_df['baby_type'] == 'NICU'])}")
-    print(f"{'=' * 80}\n")
+    tprint(f"\n{'=' * 80}")
+    tprint(f"✓ Total metadata windows: {len(metadata_df)}")
+    tprint(f"  Non-NICU: {len(metadata_df[metadata_df['baby_type'] == 'NON_NICU'])}")
+    tprint(f"  NICU: {len(metadata_df[metadata_df['baby_type'] == 'NICU'])}")
+    tprint(f"{'=' * 80}\n")
 
     return metadata_df

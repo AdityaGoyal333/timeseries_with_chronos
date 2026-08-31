@@ -26,6 +26,10 @@ from torchvision.ops import sigmoid_focal_loss
 import math
 from torch.utils.data import Sampler
 
+from log_utils import tprint
+
+from constants import BINNING_FINE_GRAINED, FINE_GRAINED_OUTPUT_SUFFIX
+
 
 class EmbeddingDataset(Dataset):
     def __init__(self, embedding_matrix, labels):
@@ -69,21 +73,56 @@ class Classifier(nn.Module):
 
 
 
-# we are randomly shuffling the positive indices and the negative indices 
-# we are then use np.array_split for as equal splitting as possible 
-# then we add the required negatives and shuffle within the batch as well 
 class UniformClassBatchSampler(Sampler):
-    def __init__(self, labels, batch_size):
+    """Spread positives across batches, then fill each batch with negatives.
+
+    Default (positive_ratio=None): each batch gets an equal share of all
+    positives (~n_pos / num_batches), remainder filled with negatives.
+
+    With positive_ratio set (e.g. 0.1): each batch starts from that equal
+    share, then tops up to positive_ratio * batch_size by sampling extra
+    positives from indices not already in the batch (reuse across batches OK).
+    """
+
+    def __init__(self, labels, batch_size, positive_ratio=None):
         self.labels = np.asarray(labels)
         self.batch_size = batch_size
+        self.positive_ratio = positive_ratio
 
         self.positive_indices = np.where(self.labels == 1)[0]
         self.negative_indices = np.where(self.labels == 0)[0]
 
         self.num_samples = len(self.labels)
-        self.num_batches = math.ceil(
-            self.num_samples / self.batch_size
-        )
+        self.num_batches = math.ceil(self.num_samples / self.batch_size)
+
+    def _target_positives_per_batch(self):
+        if self.positive_ratio is None:
+            return None
+        return min(int(round(self.positive_ratio * self.batch_size)), self.batch_size)
+
+    def _positives_for_batch(self, base_chunk, all_positives):
+        """Uniform chunk plus optional top-up / trim to hit positive_ratio."""
+        batch_pos = list(base_chunk)
+        target = self._target_positives_per_batch()
+        if target is None or len(all_positives) == 0:
+            return batch_pos
+
+        if len(batch_pos) > target:
+            np.random.shuffle(batch_pos)
+            return batch_pos[:target]
+
+        need = target - len(batch_pos)
+        if need == 0:
+            return batch_pos
+
+        in_batch = set(batch_pos)
+        pool = [idx for idx in all_positives if idx not in in_batch]
+        if not pool:
+            return batch_pos
+
+        extra = np.random.choice(pool, size=need, replace=need > len(pool))
+        batch_pos.extend(extra.tolist())
+        return batch_pos
 
     def __iter__(self):
         positive_indices = self.positive_indices.copy()
@@ -92,31 +131,21 @@ class UniformClassBatchSampler(Sampler):
         np.random.shuffle(positive_indices)
         np.random.shuffle(negative_indices)
 
-        # Divide positives as uniformly as possible among batches.
-        positive_batches = list(
-            np.array_split(positive_indices, self.num_batches)
-        )
-
+        positive_batches = list(np.array_split(positive_indices, self.num_batches))
         np.random.shuffle(positive_batches)
 
         negative_pointer = 0
 
-        for positive_batch in positive_batches:
-            batch = positive_batch.tolist()
+        for base_chunk in positive_batches:
+            batch = self._positives_for_batch(base_chunk, positive_indices)
 
             negatives_needed = self.batch_size - len(batch)
-
             batch.extend(
-                negative_indices[
-                    negative_pointer:
-                    negative_pointer + negatives_needed
-                ].tolist()
+                negative_indices[negative_pointer: negative_pointer + negatives_needed].tolist()
             )
-
             negative_pointer += negatives_needed
 
             np.random.shuffle(batch)
-
             if batch:
                 yield batch
 
@@ -581,9 +610,23 @@ def _save_fold_probabilities(y_true_folds, y_score_folds, fold_pr_curves, fold_r
     return fold_probabilities, path
 
 
-def k_fold_cv(embeddings, labels, baby_ids, k=5, epochs=50, batch_size=32, lr=0.001, device='cpu', use_focal_loss=True, alpha=None, gamma=2.0, output_dir=None,):
+def k_fold_cv(
+    embeddings,
+    labels,
+    baby_ids,
+    k=5,
+    epochs=50,
+    batch_size=32,
+    lr=0.001,
+    device='cpu',
+    use_focal_loss=True,
+    alpha=None,
+    gamma=2.0,
+    output_dir=None,
+    batch_positive_ratio=None,
+):
     if len(embeddings) == 0:
-        print('No embeddings to train on!')
+        tprint('No embeddings to train on!')
         return None, None, None, None, None, None
 
     if output_dir:
@@ -600,17 +643,17 @@ def k_fold_cv(embeddings, labels, baby_ids, k=5, epochs=50, batch_size=32, lr=0.
     pos_rate = labels.mean()
     n_babies = len(set(baby_ids)) if baby_ids is not None else None
     split_name = 'StratifiedGroupKFold (by baby_id)' if baby_ids is not None else 'StratifiedKFold (by window)'
-    print(f"\n{'=' * 80}")
-    print(f'K-fold CV | {loss_name} | {split_name}')
-    print(f'Samples: {len(labels)} | Pos rate: {pos_rate:.3f} ({labels.sum()} positives)')
+    tprint(f"\n{'=' * 80}")
+    tprint(f'K-fold CV | {loss_name} | {split_name}')
+    tprint(f'Samples: {len(labels)} | Pos rate: {pos_rate:.3f} ({labels.sum()} positives)')
     if n_babies is not None:
-        print(f'Babies: {n_babies} | Folds: {k}')
+        tprint(f'Babies: {n_babies} | Folds: {k}')
     else:
-        print(f'Folds: {k}')
-    print(f'Embedding dim: {dim}')
+        tprint(f'Folds: {k}')
+    tprint(f'Embedding dim: {dim}')
     if output_dir:
-        print(f'Curves: {output_dir}')
-    print('=' * 80)
+        tprint(f'Curves: {output_dir}')
+    tprint('=' * 80)
 
 
     baby_ids = np.asarray(baby_ids)
@@ -627,10 +670,14 @@ def k_fold_cv(embeddings, labels, baby_ids, k=5, epochs=50, batch_size=32, lr=0.
             overlap = train_babies & val_babies
             assert not overlap, f"Fold {fold + 1}: {len(overlap)} babies in both train and val"
 
-        print(f'Fold {fold + 1}/{k}...', end=' ')
+        tprint(f'Fold {fold + 1}/{k}...', end=' ')
 
         train_dataset = EmbeddingDataset( embedding_matrix[train_idx], labels[train_idx])
-        batch_sampler = UniformClassBatchSampler(labels=labels[train_idx], batch_size=batch_size)
+        batch_sampler = UniformClassBatchSampler(
+            labels=labels[train_idx],
+            batch_size=batch_size,
+            positive_ratio=batch_positive_ratio,
+        )
 
         train_loader = DataLoader(train_dataset, batch_sampler=batch_sampler)
         val_loader = DataLoader( EmbeddingDataset(embedding_matrix[val_idx], labels[val_idx]), batch_size=batch_size)
@@ -682,7 +729,7 @@ def k_fold_cv(embeddings, labels, baby_ids, k=5, epochs=50, batch_size=32, lr=0.
 
         fold_curve_data.append(curve_data)
         
-        print(
+        tprint(
             f"F1={metrics['f1']:.3f} | Recall={metrics['recall']:.3f} | "
             f"AP={metrics['average_precision']:.3f} | AUC={metrics['auc']:.3f} "
             f"(baseline AP={metrics['prevalence']:.3f})"
@@ -708,18 +755,18 @@ def k_fold_cv(embeddings, labels, baby_ids, k=5, epochs=50, batch_size=32, lr=0.
         cumulative_curves['confusion_matrix'] = _save_cumulative_confusion_matrix(fold_probabilities['y_true_folds'], fold_probabilities['y_score_folds'], output_dir, cumulative_curves['pr']['threshold'])
         cumulative_curves['loss'] = _save_cumulative_loss_curve(fold_curve_data, output_dir, k)
 
-        print(f'\nSaved cumulative ROC: {cumulative_curves["roc"]["path"]}')
-        print(f'Saved cumulative PR:  {cumulative_curves["pr"]["path"]}')
-        print(f'Saved cumulative CM:  {cumulative_curves["confusion_matrix"]["path"]}')
-        print(f'Saved cumulative loss (train): {cumulative_curves["loss"]["train_path"]}')
-        print(f'Saved cumulative loss (val):   {cumulative_curves["loss"]["val_path"]}')
-        print(f'Saved fold probs:     {fold_probabilities_path}')
+        tprint(f'\nSaved cumulative ROC: {cumulative_curves["roc"]["path"]}')
+        tprint(f'Saved cumulative PR:  {cumulative_curves["pr"]["path"]}')
+        tprint(f'Saved cumulative CM:  {cumulative_curves["confusion_matrix"]["path"]}')
+        tprint(f'Saved cumulative loss (train): {cumulative_curves["loss"]["train_path"]}')
+        tprint(f'Saved cumulative loss (val):   {cumulative_curves["loss"]["val_path"]}')
+        tprint(f'Saved fold probs:     {fold_probabilities_path}')
 
-    print(f"\n{'=' * 80}")
-    print('Average metrics')
+    tprint(f"\n{'=' * 80}")
+    tprint('Average metrics')
     for key in avg:
-        print(f'  {key:18s}: {avg[key]:.4f} ± {std[key]:.4f}')
-    print('=' * 80)
+        tprint(f'  {key:18s}: {avg[key]:.4f} ± {std[key]:.4f}')
+    tprint('=' * 80)
 
     return avg, std, fold_metrics, fold_curve_data, cumulative_curves, fold_probabilities
 
@@ -736,12 +783,27 @@ def train_and_save_results(
     epochs=250,
     batch_size=400,
     lr=0.001,
-    device='cpu',
+    batch_positive_ratio=None,
+    binning_mode='seasonal',
 ):
-    print(f"\n{'=' * 80}\nThreshold: {threshold_days} days ({loss_name})\n{'=' * 80}")
+    tprint(f"\n{'=' * 80}\nThreshold: {threshold_days} days ({loss_name})\n{'=' * 80}")
 
-    suffix = 'focal' if use_focal_loss else 'ce'
-    output_dir = f'training_curves_{threshold_days}d_{suffix}'
+    labels_arr = np.asarray(labels, dtype=int)
+    dataset_pos_rate = float(labels_arr.mean())
+    if batch_positive_ratio is None:
+        batch_positive_ratio = min(2.0 * dataset_pos_rate, 1.0)
+    tprint(
+        f"Train batch positive ratio: {batch_positive_ratio:.4f} "
+        f"(2 × dataset rate {dataset_pos_rate:.4f})"
+    )
+
+    loss_suffix = 'focal' if use_focal_loss else 'ce'
+    bin_suffix = FINE_GRAINED_OUTPUT_SUFFIX if binning_mode == BINNING_FINE_GRAINED else ''
+    output_dir = f'training_curves_{threshold_days}d_{loss_suffix}{bin_suffix}'
+
+
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
     avg, std, fold_metrics, fold_curve_data, cumulative_curves, fold_probabilities = k_fold_cv(
         embeddings,
@@ -756,9 +818,10 @@ def train_and_save_results(
         alpha=None,
         gamma=gamma,
         output_dir=output_dir,
+        batch_positive_ratio=batch_positive_ratio,
     )
 
-    filename = f'results_{threshold_days}d_{suffix}.pkl'
+    filename = f'results_{threshold_days}d_{loss_suffix}{bin_suffix}.pkl'
     with open(filename, 'wb') as f:
         pl.dump(
             {
@@ -774,7 +837,7 @@ def train_and_save_results(
             },
             f,
         )
-    print(f'\nSaved: {filename}')
-    print(f'Saved curves: {output_dir}/')
+    tprint(f'\nSaved: {filename}')
+    tprint(f'Saved curves: {output_dir}/')
 
     return avg, std, fold_metrics

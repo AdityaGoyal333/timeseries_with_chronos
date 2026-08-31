@@ -1,0 +1,10 @@
+
+Bootstrap: docker
+From: continuumio/miniconda3:latest
+
+
+%files
+    requirements.yml 
+
+%post
+    conda env create -f requirements.yml -y

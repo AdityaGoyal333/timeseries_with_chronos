@@ -1,0 +1,33 @@
+# Command to run
+
+stream_output = True
+
+stream_error  = True
+
+shell = bash timeseries_with_chronos/unzip_data.sh && /opt/conda/envs/chronos/bin/python -u timeseries_with_chronos/experiment_files/main.py
+
+container_image =  osdf:///chtc/staging/a/agoyal33/chronos.sif 
+
+should_transfer_files = YES
+transfer_input_files = /home/agoyal33/timeseries_with_chronos, osdf:///chtc/staging/a/agoyal33/vitals_new.tar.gz , osdf:///chtc/staging/a/agoyal33/vitals.tar.gz
+transfer_output_files = labels_3d.pkl, labels_5d.pkl, labels_7d.pkl, results_3d_focal.pkl, results_5d_focal.pkl, results_7d_focal.pkl, training_curves_3d_focal, training_curves_5d_focal, training_curves_7d_focal, timeseries_with_chronos/data
+
+
+# Logs
+output = logs/gpu_$(Cluster)_$(Process).out
+error  = logs/gpu_$(Cluster)_$(Process).err
+log    = logs/gpu_$(Cluster)_$(Process).log
+
+# GPU
+request_gpus = 1
+
+# Other resources
+request_cpus   = 15
+request_memory = 16GB
+request_disk   = 100GB
+
+# CHTC GPU settings
++WantGPULab = true
++GPUJobLength = "short"
+
+queue 1

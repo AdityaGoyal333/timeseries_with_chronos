@@ -28,6 +28,7 @@ from constants import (
     THRESHOLDS_DAYS,
     THRESHOLDS_SECONDS
 )
+from log_utils import tprint
 
 
 def sample_windows_once(metadata_df):
@@ -42,16 +43,16 @@ def sample_windows_once(metadata_df):
       - NICU: take NUM_SAMPLE_WINDOWS_NICU per baby, biased toward the
         late (pre-death) half of the timeline where label-1 windows live.
     """
-    print("\n" + "=" * 80)
-    print(" " * 15 + "STEP 2: SAMPLING WINDOWS (BIASED FOR BALANCE)")
-    print("=" * 80 + "\n")
+    tprint("\n" + "=" * 80)
+    tprint(" " * 15 + "STEP 2: SAMPLING WINDOWS (BIASED FOR BALANCE)")
+    tprint("=" * 80 + "\n")
 
     all_sampled_windows = []
 
     # ------------------------------------------------------------------
     # Non-NICU babies — uniform sampling, fewer windows per baby
     # ------------------------------------------------------------------
-    print("Sampling Non-NICU babies (REDUCED for balance)...")
+    tprint("Sampling Non-NICU babies (REDUCED for balance)...")
     non_nicu_babies = metadata_df[metadata_df['baby_type'] == 'NON_NICU']['baby_id'].unique()
 
     non_nicu_count = 0
@@ -71,13 +72,13 @@ def sample_windows_once(metadata_df):
         all_sampled_windows.append(selected)
         non_nicu_count += len(selected)
 
-    print(f"  ✓ Sampled {non_nicu_count} windows from {len(non_nicu_babies)} Non-NICU babies")
-    print(f"    Average: {non_nicu_count / len(non_nicu_babies):.1f} windows/baby\n")
+    tprint(f"  ✓ Sampled {non_nicu_count} windows from {len(non_nicu_babies)} Non-NICU babies")
+    tprint(f"    Average: {non_nicu_count / len(non_nicu_babies):.1f} windows/baby\n")
 
     # ------------------------------------------------------------------
     # NICU babies — biased sampling toward late (pre-death) windows
     # ------------------------------------------------------------------
-    print("Sampling NICU babies (BIASED toward later windows)...")
+    tprint("Sampling NICU babies (BIASED toward later windows)...")
     nicu_babies = metadata_df[metadata_df['baby_type'] == 'NICU']['baby_id'].unique()
 
     nicu_count = 0
@@ -124,19 +125,19 @@ def sample_windows_once(metadata_df):
                 all_sampled_windows.append(selected)
                 nicu_count += len(selected)
 
-    print(f"  ✓ Sampled {nicu_count} windows from {len(nicu_babies)} NICU babies")
-    print(f"    Average: {nicu_count / len(nicu_babies):.1f} windows/baby")
-    print(f"    Early windows: {early_count} ({early_count / nicu_count * 100:.1f}%)")
-    print(f"    Late windows: {late_count} ({late_count / nicu_count * 100:.1f}%)\n")
+    tprint(f"  ✓ Sampled {nicu_count} windows from {len(nicu_babies)} NICU babies")
+    tprint(f"    Average: {nicu_count / len(nicu_babies):.1f} windows/baby")
+    tprint(f"    Early windows: {early_count} ({early_count / nicu_count * 100:.1f}%)")
+    tprint(f"    Late windows: {late_count} ({late_count / nicu_count * 100:.1f}%)\n")
 
     sampled_windows_df = pd.concat(all_sampled_windows, ignore_index=True)
 
-    print(f"{'=' * 80}")
-    print(f"✓ Total sampled windows: {len(sampled_windows_df)}")
-    print(f"  Non-NICU: {len(sampled_windows_df[sampled_windows_df['baby_type'] == 'NON_NICU'])}")
-    print(f"  NICU: {len(sampled_windows_df[sampled_windows_df['baby_type'] == 'NICU'])}")
-    print(f"  Bias applied: {NICU_LATE_WINDOW_BIAS * 100:.0f}% late, {(1 - NICU_LATE_WINDOW_BIAS) * 100:.0f}% early")
-    print(f"{'=' * 80}\n")
+    tprint(f"{'=' * 80}")
+    tprint(f"✓ Total sampled windows: {len(sampled_windows_df)}")
+    tprint(f"  Non-NICU: {len(sampled_windows_df[sampled_windows_df['baby_type'] == 'NON_NICU'])}")
+    tprint(f"  NICU: {len(sampled_windows_df[sampled_windows_df['baby_type'] == 'NICU'])}")
+    tprint(f"  Bias applied: {NICU_LATE_WINDOW_BIAS * 100:.0f}% late, {(1 - NICU_LATE_WINDOW_BIAS) * 100:.0f}% early")
+    tprint(f"{'=' * 80}\n")
 
     return sampled_windows_df
 
@@ -156,15 +157,15 @@ def assign_labels_for_all_thresholds(sampled_windows_df):
                                           threshold_start
       If window_end > threshold_start  →  label 1
     """
-    print("\n" + "=" * 80)
-    print(" " * 15 + "ASSIGNING LABELS FOR ALL THRESHOLDS")
-    print(" " * 20 + "(Same windows, different labels)")
-    print("=" * 80 + "\n")
+    tprint("\n" + "=" * 80)
+    tprint(" " * 15 + "ASSIGNING LABELS FOR ALL THRESHOLDS")
+    tprint(" " * 20 + "(Same windows, different labels)")
+    tprint("=" * 80 + "\n")
 
     all_labeled_data = []
 
     for threshold_days, threshold_seconds in zip(THRESHOLDS_DAYS, THRESHOLDS_SECONDS):
-        print(f"Assigning labels for {threshold_days}-day threshold...")
+        tprint(f"Assigning labels for {threshold_days}-day threshold...")
 
         df = sampled_windows_df.copy()
 
@@ -187,8 +188,8 @@ def assign_labels_for_all_thresholds(sampled_windows_df):
         n_total = len(df)
         n_label_0 = (df['label'] == 0).sum()
         n_label_1 = (df['label'] == 1).sum()
-        print(f"  ✓ Total: {n_total}, Label 0: {n_label_0}, Label 1: {n_label_1}")
-        print(f"    Class balance: {n_label_0 / n_total * 100:.1f}% / {n_label_1 / n_total * 100:.1f}%\n")
+        tprint(f"  ✓ Total: {n_total}, Label 0: {n_label_0}, Label 1: {n_label_1}")
+        tprint(f"    Class balance: {n_label_0 / n_total * 100:.1f}% / {n_label_1 / n_total * 100:.1f}%\n")
 
     # Stack all thresholds — same windows repeated with different labels
     all_labeled_df = pd.concat(all_labeled_data, ignore_index=False)
@@ -196,11 +197,11 @@ def assign_labels_for_all_thresholds(sampled_windows_df):
     # Step 3 only needs unique windows (labels don't affect the embedding)
     unique_windows_df = sampled_windows_df.copy()
 
-    print(f"\n{'=' * 80}")
-    print(f"✓ Total labeled entries: {len(all_labeled_df)}")
-    print(f"✓ Unique windows: {len(unique_windows_df)}")
-    print(f"  (Each window appears {len(THRESHOLDS_DAYS)} times with different labels)")
-    print(f"{'=' * 80}\n")
+    tprint(f"\n{'=' * 80}")
+    tprint(f"✓ Total labeled entries: {len(all_labeled_df)}")
+    tprint(f"✓ Unique windows: {len(unique_windows_df)}")
+    tprint(f"  (Each window appears {len(THRESHOLDS_DAYS)} times with different labels)")
+    tprint(f"{'=' * 80}\n")
 
     return all_labeled_df, unique_windows_df
 
