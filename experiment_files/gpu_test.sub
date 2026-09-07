@@ -4,13 +4,15 @@ stream_output = True
 
 stream_error  = True
 
-shell = bash timeseries_with_chronos/unzip_data.sh && /opt/conda/envs/chronos/bin/python -u timeseries_with_chronos/experiment_files/main.py --binning seasonal && bash timeseries_with_chronos/clean_data.sh 
+shell = bash timeseries_with_chronos/unzip_data.sh && /opt/conda/envs/chronos/bin/python -u timeseries_with_chronos/experiment_files/main.py --binning seasonal && bash timeseries_with_chronos/clean_data.sh ; bash -c 'for s in 3d 5d 7d; do touch labels_${s}.pkl labels_${s}_fine_grained.pkl results_${s}_focal.pkl results_${s}_focal_fine_grained.pkl; mkdir -p training_curves_${s}_focal training_curves_${s}_focal_fine_grained; done'
 
 container_image =  osdf:///chtc/staging/a/agoyal33/chronos3.sif 
 
 should_transfer_files = YES
 transfer_input_files = /home/agoyal33/timeseries_with_chronos, osdf:///chtc/staging/a/agoyal33/vitals_old.tar, osdf:///chtc/staging/a/agoyal33/vitals_multi.tar
-transfer_output_files = labels_3d.pkl, labels_5d.pkl, labels_7d.pkl, results_3d_focal.pkl, results_5d_focal.pkl, results_7d_focal.pkl, training_curves_3d_focal, training_curves_5d_focal, training_curves_7d_focal, timeseries_with_chronos/data
+# HTCondor has no globs here. List both modes so a missing name does not hold the job
+# (the shell `touch` / `mkdir` above creates empty placeholders for the unused mode).
+transfer_output_files = labels_3d.pkl, labels_5d.pkl, labels_7d.pkl, labels_3d_fine_grained.pkl, labels_5d_fine_grained.pkl, labels_7d_fine_grained.pkl, results_3d_focal.pkl, results_5d_focal.pkl, results_7d_focal.pkl, results_3d_focal_fine_grained.pkl, results_5d_focal_fine_grained.pkl, results_7d_focal_fine_grained.pkl, training_curves_3d_focal, training_curves_5d_focal, training_curves_7d_focal, training_curves_3d_focal_fine_grained, training_curves_5d_focal_fine_grained, training_curves_7d_focal_fine_grained, timeseries_with_chronos/data
 
 
 # Logs

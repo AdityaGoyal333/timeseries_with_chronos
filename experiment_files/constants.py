@@ -31,14 +31,16 @@ NUM_SAMPLE_WINDOWS_NICU = 100
 # Fraction of NICU sample slots allocated to the late (pre-death) half of timeline
 NICU_LATE_WINDOW_BIAS = 0.92
 
-# --- Step 3: binning modes (how one 80h window is sliced before Chronos) ---
-BINNING_SEASONAL = 'seasonal'           # 960 equal 300s bins (current default workflow)
-BINNING_FINE_GRAINED = 'fine_grained'   # 960 geometric bins, coarse early → fine late
+# --- Step 3: binning modes (how one 80h sample is sliced before Chronos) ---
+BINNING_SEASONAL = 'seasonal'
+BINNING_FINE_GRAINED = 'fine_grained'
 BINNING_CHOICES = (BINNING_SEASONAL, BINNING_FINE_GRAINED)
 
-# Fine-grained: first bin (start of window) is widest, last bin (near window_end) is narrowest
-FINE_GRAINED_MIN_BIN_SECONDS = 60    # 1 minute
-FINE_GRAINED_MAX_BIN_SECONDS = 900   # 15 minutes
+# Fine-grained: last C seconds of the same 80h sample, equal bins of W seconds.
+# Chronos length = FG_CONTEXT_SIZE_SECONDS // FG_WINDOW_SIZE_SECONDS (tune this pair).
+FG_CONTEXT_SIZE_SECONDS = 7680   # 2 hours
+FG_WINDOW_SIZE_SECONDS = 8
+NUM_WINDOWS_FG = FG_CONTEXT_SIZE_SECONDS // FG_WINDOW_SIZE_SECONDS
 
 # Separate embedding caches per binning mode (window pickles are shared)
 EMBEDDINGS_CACHE_PATHS = {

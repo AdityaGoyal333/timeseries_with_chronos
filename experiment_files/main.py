@@ -69,7 +69,8 @@ def run_complete_pipeline(use_focal_loss, gamma, binning_mode):
     Args:
         use_focal_loss: If True, train with focal loss; else binary cross-entropy.
         gamma: Focal-loss focusing parameter (only used when use_focal_loss=True).
-        binning_mode: 'seasonal' (960×300s) or 'fine_grained' (geometric bins).
+        binning_mode: 'seasonal' (full 80h, 300s bins) or 'fine_grained'
+            (last FG_CONTEXT hours of the same 80h sample, FG_WINDOW bins).
     """
 
     loss_name = f"Focal Loss (γ={gamma})" if use_focal_loss else "Cross-Entropy"
@@ -184,7 +185,7 @@ if __name__ == "__main__":
         "--binning",
         required=True,
         choices=BINNING_CHOICES,
-        help="seasonal: 960×300s bins; fine_grained: geometric 15min→1min bins",
+        help="seasonal: full 80h, 300s bins; fine_grained: last 2h of the same sample, 2s bins",
     )
     parser.add_argument("--gamma", type=float, default=2.0, help="Focal loss gamma")
     parser.add_argument(

@@ -9,8 +9,9 @@ Step 4:  For each death-proximity threshold, pair cached embeddings with
          their threshold-specific labels → ready for classifier training.
 
 Binning modes (see constants.BINNING_*):
-  seasonal      — 960 × 300s equal bins
-  fine_grained  — 960 geometric bins (15 min → 1 min), separate cache file
+  seasonal      — full 80h sample, equal WINDOW_SIZE_SECONDS bins
+  fine_grained  — last FG_CONTEXT hours of the same sample, equal FG_WINDOW bins
+                  (same cache key; separate pickle file)
 """
 
 import os
@@ -25,23 +26,19 @@ from chronos import Chronos2Pipeline
 
 from constants import (
     BINNING_FINE_GRAINED,
-    BINNING_SEASONAL,
     CONTEXT_SIZE_SECONDS,
     EMBEDDINGS_CACHE_PATHS,
-    FINE_GRAINED_MAX_BIN_SECONDS,
-    FINE_GRAINED_MIN_BIN_SECONDS,
+    FG_CONTEXT_SIZE_SECONDS,
+    FG_WINDOW_SIZE_SECONDS,
     FINE_GRAINED_OUTPUT_SUFFIX,
     MISSING_WINDOWS_PATHS,
-    NUM_WINDOWS,
+    NUM_WINDOWS_FG,
     WINDOW_SIZE_SECONDS,
 )
 from log_utils import tprint
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = (BASE_DIR / "data").resolve()
-
-# Computed once; 960 integer widths summing to CONTEXT_SIZE_SECONDS
-_fine_grained_bin_widths = None
 
 
 def output_suffix(binning_mode):
@@ -59,35 +56,19 @@ def cache_paths(binning_mode):
     )
 
 
-def geometric_bin_widths(context_length, n_values, min_width, max_width):
-    """Build n_values bin widths (seconds) that sum exactly to context_length.
+def embed_slice(binning_mode, window_start, window_end):
+    """Return (load_start, context_seconds, bin_width) for this mode.
 
-    Widths follow a geometric progression from max_width (index 0, early in
-    the window) down to min_width (index n-1, late in the window).
+    Fine-grained uses the tail of the same 80h sample so the last bin
+    lines up with window_end (the time the label is about).
     """
-    ratio = (min_width / max_width) ** (1.0 / (n_values - 1))
-    weights = max_width * (ratio ** np.arange(n_values, dtype=float))
-    widths = weights / weights.sum() * context_length
-
-    floored = np.floor(widths).astype(int)
-    remainder = int(context_length - floored.sum())
-    # Distribute leftover seconds to bins with largest fractional parts
-    order = np.argsort(widths - floored)[::-1]
-    floored[order[:remainder]] += 1
-    return floored
-
-
-def get_fine_grained_bin_widths():
-    """Lazy-load the 960-bin geometric schedule (shared across all windows)."""
-    global _fine_grained_bin_widths
-    if _fine_grained_bin_widths is None:
-        _fine_grained_bin_widths = geometric_bin_widths(
-            CONTEXT_SIZE_SECONDS,
-            NUM_WINDOWS,
-            FINE_GRAINED_MIN_BIN_SECONDS,
-            FINE_GRAINED_MAX_BIN_SECONDS,
+    if binning_mode == BINNING_FINE_GRAINED:
+        return (
+            window_end - FG_CONTEXT_SIZE_SECONDS,
+            FG_CONTEXT_SIZE_SECONDS,
+            FG_WINDOW_SIZE_SECONDS,
         )
-    return _fine_grained_bin_widths
+    return window_start, CONTEXT_SIZE_SECONDS, WINDOW_SIZE_SECONDS
 
 
 def prepare_chronos_input(hr_windows, spo2_windows):
@@ -177,45 +158,25 @@ def _aggregate_into_bins(timestamps, hr_raw, spo2_raw, start_time, num_windows, 
     return hr_windows, spo2_windows
 
 
-def create_windowed_features_from_raw(raw_data, binning_mode):
-    """Aggregate raw samples into 960 Chronos bins (seasonal or fine-grained)."""
+def create_windowed_features_from_raw(raw_data, window_size):
+    """Equal-width mean HR/SpO2 bins over [start, start + context)."""
     timestamps = raw_data['timestamps']
     hr_raw = raw_data['hr_raw']
     spo2_raw = raw_data['spo2_raw']
     start_time = raw_data['start_time']
-
-    if binning_mode == BINNING_SEASONAL:
-        window_indices = np.floor(
-            (timestamps - start_time) / WINDOW_SIZE_SECONDS
-        ).astype(int)
-        num_windows = int(np.ceil(raw_data['context_size'] / WINDOW_SIZE_SECONDS))
-        return _aggregate_into_bins(
-            timestamps, hr_raw, spo2_raw, start_time, num_windows, window_indices
-        )
-
-    # fine_grained: variable-width bins via cumulative edges
-    bin_widths = get_fine_grained_bin_widths()
-    num_windows = len(bin_widths)
-    edges = np.concatenate([[0], np.cumsum(bin_widths)])
-    rel = timestamps - start_time
-    bin_idx = np.searchsorted(edges, rel, side='right') - 1
-    in_range = (bin_idx >= 0) & (bin_idx < num_windows)
+    bin_idx = np.floor((timestamps - start_time) / window_size).astype(int)
+    num_windows = int(np.ceil(raw_data['context_size'] / window_size))
     return _aggregate_into_bins(
-        timestamps[in_range],
-        hr_raw[in_range],
-        spo2_raw[in_range],
-        start_time,
-        num_windows,
-        bin_idx[in_range],
+        timestamps, hr_raw, spo2_raw, start_time, num_windows, bin_idx
     )
 
 
-def create_windowed_features(mat_file_path, start_time, context_size, binning_mode):
+def create_windowed_features(mat_file_path, start_time, context_size, window_size):
     """Load .mat file and return (hr_windows, spo2_windows) for Chronos."""
     raw_data = extract_raw_timeseries(mat_file_path, start_time, context_size)
     if raw_data is None:
         return None
-    return create_windowed_features_from_raw(raw_data, binning_mode)
+    return create_windowed_features_from_raw(raw_data, window_size)
 
 
 def baby_id_from_window_key(key):
@@ -289,6 +250,11 @@ def generate_missing_embeddings(missing_df, cache, pipeline, cache_path, binning
     tprint("\n" + "=" * 80)
     tprint(" " * 12 + "STEP 3b: GENERATING MISSING EMBEDDINGS")
     tprint(f"  Binning: {binning_mode}")
+    if binning_mode == BINNING_FINE_GRAINED:
+        tprint(
+            f"  FG slice: last {FG_CONTEXT_SIZE_SECONDS}s, "
+            f"bin {FG_WINDOW_SIZE_SECONDS}s → {NUM_WINDOWS_FG} steps"
+        )
     tprint("=" * 80 + "\n")
     tprint(f"Generating {total} missing embeddings (checkpoint every {save_every})...\n")
 
@@ -300,11 +266,14 @@ def generate_missing_embeddings(missing_df, cache, pipeline, cache_path, binning
     for i, (_, row) in enumerate(missing_df.iterrows()):
         key = create_window_key(row['mat_file'], row['window_start'], row['window_end'])
         try:
+            load_start, context_size, window_size = embed_slice(
+                binning_mode, row['window_start'], row['window_end']
+            )
             result = create_windowed_features(
                 row['mat_file'],
-                row['window_start'],
-                CONTEXT_SIZE_SECONDS,
-                binning_mode,
+                load_start,
+                context_size,
+                window_size,
             )
             if result is not None:
                 cache[key] = get_embedding(result[0], result[1], pipeline)
