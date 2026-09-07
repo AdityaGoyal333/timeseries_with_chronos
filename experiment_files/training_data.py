@@ -372,7 +372,7 @@ def ensure_embeddings_for_windows(windows_df, binning_mode, save_every=500):
 
     pipeline = Chronos2Pipeline.from_pretrained(
         "amazon/chronos-2",
-        device_map=chronos_device,
+        device_map="cuda",
         dtype=torch.bfloat16,
     )
     cache = generate_missing_embeddings(

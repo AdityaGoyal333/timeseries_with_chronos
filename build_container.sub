@@ -1,4 +1,4 @@
-shell = pwd; ls -lah; echo "=== APPTAINER ==="; which apptainer; apptainer --version; echo "=== DEF FILE ==="; cat chronos.def; echo "=== REQUIREMENTS ==="; ls -lh requirements.yml; echo "=== BUILD ==="; apptainer build chronos.sif chronos.def; echo "EXIT_CODE=$?"
+shell =  apptainer build chronos.sif chronos.def
 
 should_transfer_files = YES
 transfer_input_files = /home/agoyal33/timeseries_with_chronos/requirements.yml, /home/agoyal33/timeseries_with_chronos/chronos.def

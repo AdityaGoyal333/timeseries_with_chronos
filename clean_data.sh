@@ -1,0 +1,1 @@
+rm -rf timeseries_with_chronos/data/download

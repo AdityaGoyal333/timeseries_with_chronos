@@ -1,10 +1,14 @@
-
 Bootstrap: docker
-From: continuumio/miniconda3:latest
 
+From: condaforge/miniforge3:latest
 
 %files
     requirements.yml 
 
 %post
+    export CONDA_OVERRIDE_CUDA="12.1"
+    conda install -n base -c conda-forge nano -y
     conda env create -f requirements.yml -y
+
+%environment
+    export PATH="/opt/conda/envs/chronos/bin:/opt/conda/bin:$PATH"

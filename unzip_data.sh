@@ -1,6 +1,9 @@
-# mv vitals_new.tar.gz timeseries_with_chronos/analysis
-mv vitals.tar.gz timeseries_with_chronos/data/download
 
+# Step 1: Create the target directory so tar has somewhere to extract into
+mkdir -p timeseries_with_chronos/data/download
 
-# tar -xzf timeseries_with_chronos/analysis/vitals_new.tar.gz
-tar -xzf timeseries_with_chronos/data/download/vitals.tar.gz
+# Step 2: Read archive from $PWD, extract (-xf) into destination (-C)
+tar -xf vitals_old.tar -C timeseries_with_chronos/data/download
+
+# deleting the tar file
+rm -f vitals_old.tar

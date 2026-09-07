@@ -804,6 +804,7 @@ def train_and_save_results(
 
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Kfold device: {device}")
 
     avg, std, fold_metrics, fold_curve_data, cumulative_curves, fold_probabilities = k_fold_cv(
         embeddings,

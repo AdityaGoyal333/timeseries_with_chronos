@@ -1,8 +1,10 @@
 name: chronos
 
+# removed the nviida channel after warning that it wont be updated after august 7th 
 channels:
-  - conda-forge
   - pytorch
+  - nvidia/label/cuda-12.1.0
+  - conda-forge
   - defaults
 
 dependencies:
@@ -64,8 +66,6 @@ dependencies:
   - sympy=1.14.0
   - threadpoolctl=3.6.0
   - tokenizers=0.22.2
-  - pytorch=2.12.0
-  - torchvision=0.27.0
   - tornado=6.5.7
   - tqdm=4.68.2
   - traitlets=5.15.1
@@ -73,6 +73,10 @@ dependencies:
   - typing_extensions=4.15.0
   - urllib3=2.7.0
   - wcwidth=0.8.1
+  - pytorch=2.5.0
+  - torchvision=0.20.0
+  - torchaudio=2.5.0
+  - pytorch-cuda=12.1
 
   - pip
   - pip:
