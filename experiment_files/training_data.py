@@ -1,17 +1,26 @@
-"""Step 3–4: Generate missing Chronos embeddings and prepare training data.
+"""Steps 3–4: Chronos embeddings and join of Step 2 labels to cache(s).
 
 Pipeline role
 -------------
-Step 3:  Run Amazon Chronos-2 on each unique sampled window → fixed-size
-         embedding vector. Results are cached globally so we never recompute.
+Step 3:  Run Chronos-2 on each unique sampled window → one vector per 80h
+         key. Separate pickles per binning mode; keys are shared.
+Step 4:  Filter sampled_windows_all_thresholds to one threshold and attach
+         vectors (singular: one cache; concat: seasonal then FG).
 
-Step 4:  For each death-proximity threshold, pair cached embeddings with
-         their threshold-specific labels → ready for classifier training.
+Called from main.train (Step 3) and main.classify (Step 4). Does not train
+the MLP.
 
-Binning modes (see constants.BINNING_*):
-  seasonal      — full 80h sample, equal WINDOW_SIZE_SECONDS bins
-  fine_grained  — last FG_CONTEXT hours of the same sample, equal FG_WINDOW bins
-                  (same cache key; separate pickle file)
+Binning
+-------
+  seasonal      — [window_start, +80h), WINDOW_SIZE_SECONDS bins
+  fine_grained  — [window_end - FG_CONTEXT, window_end), FG_WINDOW bins
+
+Outputs
+-------
+  data/embeddings_global.pkl
+  data/embeddings_global_fine_grained.pkl
+  data/windows_missing_embeddings[_fine_grained].pkl
+  labels_{N}d[_fine_grained|_concat].pkl
 """
 
 import os
@@ -26,11 +35,14 @@ from chronos import Chronos2Pipeline
 
 from constants import (
     BINNING_FINE_GRAINED,
+    BINNING_SEASONAL,
+    CONCAT_OUTPUT_SUFFIX,
     CONTEXT_SIZE_SECONDS,
     EMBEDDINGS_CACHE_PATHS,
     FG_CONTEXT_SIZE_SECONDS,
     FG_WINDOW_SIZE_SECONDS,
     FINE_GRAINED_OUTPUT_SUFFIX,
+    HEAD_CONCAT,
     MISSING_WINDOWS_PATHS,
     NUM_WINDOWS_FG,
     WINDOW_SIZE_SECONDS,
@@ -41,8 +53,14 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = (BASE_DIR / "data").resolve()
 
 
-def output_suffix(binning_mode):
-    """Filename suffix for labels/results when using fine-grained binning."""
+def output_suffix(binning_mode=None, head=None):
+    """Return artifact suffix for labels / results / curve dirs.
+
+    Concat wins over mode so a leftover --mode cannot write _fine_grained
+    files when the head is concat.
+    """
+    if head == HEAD_CONCAT:
+        return CONCAT_OUTPUT_SUFFIX
     if binning_mode == BINNING_FINE_GRAINED:
         return FINE_GRAINED_OUTPUT_SUFFIX
     return ''
@@ -101,12 +119,17 @@ def get_chronos_embedding(chronos_input, pipeline):
 
 
 def get_embedding(hr_windows, spo2_windows, pipeline):
+    """NaN-fill HR/SpO2 bins, embed with Chronos-2, return one concatenated vector."""
     chronos_input = prepare_chronos_input(hr_windows, spo2_windows)
     return get_chronos_embedding(chronos_input, pipeline)
 
 
 def extract_raw_timeseries(mat_file_path, start_time, context_size):
-    """Load HR and SpO2 samples from a .mat file within [start, start + context)."""
+    """Load HR and SpO2 samples from a .mat file within [start, start + context).
+
+    Returns None if the file cannot be read or the half-open interval has no
+    paired (HR, SpO2) samples. Empty FG tails therefore skip embedding.
+    """
     try:
         mat_data = scipy.io.loadmat(mat_file_path)
     except Exception as e:
@@ -121,6 +144,7 @@ def extract_raw_timeseries(mat_file_path, start_time, context_size):
     spo2_cols = mat_data['vdata'][:, 2]
     timestamps = mat_data['vt'].flatten()
 
+    # Half-open interval so adjacent bins do not double-count a timestamp.
     end_time = start_time + context_size
     time_mask = (timestamps >= start_time) & (timestamps < end_time)
     valid_mask = ~np.isnan(hr_cols) & ~np.isnan(spo2_cols)
@@ -180,15 +204,18 @@ def create_windowed_features(mat_file_path, start_time, context_size, window_siz
 
 
 def baby_id_from_window_key(key):
+    """Strip trailing _start_end; baby_id itself may contain underscores."""
     return key.rsplit('_', 2)[0]
 
 
 def create_window_key(mat_file, window_start, window_end):
+    """Stable cache key: baby + 80h window bounds (not the FG load_start)."""
     baby_id = mat_file.split('/')[-1].replace('.mat', '')
     return f"{baby_id}_{int(window_start)}_{int(window_end)}"
 
 
 def ensure_numpy_pickle_compat():
+    """Alias numpy._core so pickles written on NumPy 2 load on NumPy 1."""
     import sys
 
     try:
@@ -202,12 +229,14 @@ def ensure_numpy_pickle_compat():
 
 
 def load_pickle(path):
+    """Unpickle after applying NumPy 1/2 module aliases."""
     ensure_numpy_pickle_compat()
     with open(path, 'rb') as f:
         return pl.load(f)
 
 
 def save_pickle(obj, path):
+    """Atomic write so a crash mid-dump does not truncate the cache."""
     tmp_path = f'{path}.tmp'
     with open(tmp_path, 'wb') as f:
         pl.dump(obj, f)
@@ -215,6 +244,7 @@ def save_pickle(obj, path):
 
 
 def load_embeddings_cache(cache_path):
+    """Load {window_key: vector} or {} if the cache file is absent."""
     if not os.path.exists(cache_path):
         return {}
     try:
@@ -228,10 +258,12 @@ def load_embeddings_cache(cache_path):
 
 
 def save_embeddings_cache(cache, cache_path):
+    """Persist the full embeddings dict via atomic pickle."""
     save_pickle(cache, cache_path)
 
 
 def detect_missing_windows(windows_df, cache):
+    """Rows whose 80h key is absent from this mode's cache (empty DF if none)."""
     missing_indices = []
     for idx, row in windows_df.iterrows():
         key = create_window_key(row['mat_file'], row['window_start'], row['window_end'])
@@ -243,6 +275,11 @@ def detect_missing_windows(windows_df, cache):
 
 
 def generate_missing_embeddings(missing_df, cache, pipeline, cache_path, binning_mode, save_every=500):
+    """Embed missing rows for one mode; checkpoint the cache every save_every successes.
+
+    Failures (empty slice or exception) leave the key absent so classify can
+    drop that sample. Keys stay on the 80h window even when FG loads a tail.
+    """
     total = len(missing_df)
     if total == 0:
         return cache
@@ -266,6 +303,7 @@ def generate_missing_embeddings(missing_df, cache, pipeline, cache_path, binning
     for i, (_, row) in enumerate(missing_df.iterrows()):
         key = create_window_key(row['mat_file'], row['window_start'], row['window_end'])
         try:
+            # FG: [window_end - C, window_end); seasonal: full [window_start, +80h).
             load_start, context_size, window_size = embed_slice(
                 binning_mode, row['window_start'], row['window_end']
             )
@@ -284,6 +322,7 @@ def generate_missing_embeddings(missing_df, cache, pipeline, cache_path, binning
         except Exception:
             failed += 1
 
+        # Incremental save: long CHTC jobs can be preempted mid-loop.
         if new_since_save >= save_every:
             save_embeddings_cache(cache, cache_path)
             tprint(f"  💾 Checkpoint at {i + 1}/{total} (cache: {len(cache)}, +{new_since_save} new)")
@@ -319,6 +358,7 @@ def ensure_embeddings_for_windows(windows_df, binning_mode, save_every=500):
 
     cache = load_embeddings_cache(embeddings_path)
 
+    # Compare required 80h keys to this mode's pickle only.
     tprint("STEP 3a: Detecting missing embeddings...")
     missing_df = detect_missing_windows(windows_df, cache)
     n_total = len(windows_df)
@@ -336,6 +376,7 @@ def ensure_embeddings_for_windows(windows_df, binning_mode, save_every=500):
         tprint("✓ Nothing missing — skipping generation\n")
         return cache
 
+    # Load Chronos only when there is work; classify never reaches this path.
     chronos_device = "cuda" if torch.cuda.is_available() else "cpu"
     tprint(f"Chronos-2 device: {chronos_device}")
 
@@ -358,7 +399,10 @@ def ensure_embeddings_for_windows(windows_df, binning_mode, save_every=500):
 def prepare_training_data_for_threshold(
     threshold_days, samples_windows_path, binning_mode, embeddings_cache=None
 ):
-    """Join labeled windows with cached embeddings for one threshold (Step 4)."""
+    """Step 4 singular: join Step 2 labels to one mode cache; drop missing keys.
+
+    Writes labels_{N}d[_fine_grained].pkl. Does not recompute labels.
+    """
     suffix = output_suffix(binning_mode)
     labels_path = f'labels_{threshold_days}d{suffix}.pkl'
 
@@ -375,6 +419,7 @@ def prepare_training_data_for_threshold(
     labels = []
     baby_ids = []
 
+    # Keep a row only if this mode already has a vector for that 80h key.
     for _, row in threshold_data.iterrows():
         key = create_window_key(row['mat_file'], row['window_start'], row['window_end'])
         if key in embeddings_cache:
@@ -394,8 +439,58 @@ def prepare_training_data_for_threshold(
     return embeddings, labels, baby_ids
 
 
+def prepare_concat_training_data_for_threshold(threshold_days, samples_windows_path):
+    """Step 4 concat: inner-join both caches; vector is seasonal then FG.
+
+    Incomplete keys are dropped (counts printed). Writes labels_{N}d_concat.pkl.
+    """
+    suffix = output_suffix(head=HEAD_CONCAT)
+    labels_path = f'labels_{threshold_days}d{suffix}.pkl'
+
+    seasonal_cache = load_embeddings_cache(cache_paths(BINNING_SEASONAL)[0])
+    fg_cache = load_embeddings_cache(cache_paths(BINNING_FINE_GRAINED)[0])
+    seasonal_keys = set(seasonal_cache)
+    fg_keys = set(fg_cache)
+
+    tprint(f"\nPreparing {threshold_days}-day threshold (head=concat)...")
+    tprint(f"  Keys only in seasonal: {len(seasonal_keys - fg_keys)}")
+    tprint(f"  Keys only in fine_grained: {len(fg_keys - seasonal_keys)}")
+    tprint(f"  Keys in both: {len(seasonal_keys & fg_keys)}")
+
+    sampled_all = pd.read_pickle(samples_windows_path)
+    threshold_data = sampled_all[sampled_all['threshold_days'] == threshold_days]
+
+    embedding_keys = []
+    labels = []
+    baby_ids = []
+    embeddings = []
+
+    # Inner join on the shared 80h key; order is seasonal ∥ fine_grained.
+    for _, row in threshold_data.iterrows():
+        key = create_window_key(row['mat_file'], row['window_start'], row['window_end'])
+        if key in seasonal_cache and key in fg_cache:
+            embedding_keys.append(key)
+            labels.append(int(row['label']))
+            baby_ids.append(baby_id_from_window_key(key))
+            embeddings.append(
+                np.concatenate([seasonal_cache[key], fg_cache[key]])
+            )
+
+    tprint(f"  ✓ {len(embedding_keys)} samples (L0:{labels.count(0)}, L1:{labels.count(1)})")
+    tprint(f"  ✓ {len(set(baby_ids))} unique babies")
+
+    with open(labels_path, 'wb') as f:
+        pl.dump({'embedding_keys': embedding_keys, 'labels': labels, 'baby_ids': baby_ids}, f)
+
+    tprint(f"  ✓ Saved: {labels_path} (~{(len(embedding_keys) * 100) / 1024:.2f} KB)")
+    return embeddings, labels, baby_ids
+
+
 def load_training_data_for_threshold(threshold_days, binning_mode):
-    """Reload keys + labels and fetch embeddings from the cache for this binning mode."""
+    """Reload a singular labels pickle and look up vectors in that mode's cache.
+
+    Does not handle concat (those vectors are not stored in one cache).
+    """
     suffix = output_suffix(binning_mode)
     labels_path = f'labels_{threshold_days}d{suffix}.pkl'
 
@@ -409,6 +504,7 @@ def load_training_data_for_threshold(threshold_days, binning_mode):
     embeddings = [embeddings_cache[key] for key in data['embedding_keys']]
     labels = data['labels']
     baby_ids = data.get('baby_ids')
+    # Older pickles stored keys only; derive baby_id the same way as write path.
     if baby_ids is None:
         baby_ids = [baby_id_from_window_key(key) for key in data['embedding_keys']]
 

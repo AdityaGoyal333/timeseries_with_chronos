@@ -1,4 +1,4 @@
-"""Step 2: Sample windows and assign labels for all thresholds.
+"""Step 2: Downsample candidate windows and label them for all thresholds.
 
 Pipeline role
 -------------

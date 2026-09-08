@@ -1,7 +1,7 @@
 shell =  apptainer build chronos.sif chronos.def
 
 should_transfer_files = YES
-transfer_input_files = /home/agoyal33/timeseries_with_chronos/requirements.yml, /home/agoyal33/timeseries_with_chronos/chronos.def
+transfer_input_files = /home/agoyal33/timeseries_with_chronos/requirements.yml, /home/agoyal33/timeseries_with_chronos/chtc_scripts/chronos.def
 
 # Logs
 output = logs/gpu_$(Cluster)_$(Process).out

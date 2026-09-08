@@ -1,3 +1,15 @@
+"""Shared knobs for the NICU mortality pipeline (Steps 1–5).
+
+Pipeline role
+-------------
+Imported by window_metadata, sampling, training_data, train_classifier, and
+main. Change geometry, thresholds, cache filenames, and CLI tokens here so
+those modules stay in sync.
+
+Not a runnable step. Values below are the contract for pickle names and
+window keys; changing them invalidates existing caches unless you regenerate.
+"""
+
 # =============================================================================
 # Constants and paths
 # =============================================================================
@@ -52,5 +64,11 @@ MISSING_WINDOWS_PATHS = {
     BINNING_FINE_GRAINED: 'windows_missing_embeddings_fine_grained.pkl',
 }
 
-# Suffix for labels / results / curve dirs when binning != seasonal
+# Filename suffixes so seasonal / FG / concat artifacts do not overwrite each other.
 FINE_GRAINED_OUTPUT_SUFFIX = '_fine_grained'
+CONCAT_OUTPUT_SUFFIX = '_concat'
+
+# classify --head: one cache (singular) vs seasonal∥FG (concat). Concat ignores --mode.
+HEAD_SINGULAR = 'singular'
+HEAD_CONCAT = 'concat'
+HEAD_CHOICES = (HEAD_SINGULAR, HEAD_CONCAT)

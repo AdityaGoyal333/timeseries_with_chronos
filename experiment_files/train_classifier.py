@@ -1,4 +1,19 @@
-"""Step 5: Train binary classifier on Chronos embeddings with k-fold CV."""
+"""Step 5: k-fold MLP on Chronos embeddings (no Chronos in this module).
+
+Pipeline role
+-------------
+Takes (embeddings, labels, baby_ids) from Step 4 and trains a small MLP
+with StratifiedGroupKFold by baby. Writes per-fold and pooled curves plus
+results_{N}d_{focal|ce}[suffix].pkl.
+
+Called from main.classify via train_and_save_results. Artifact suffix
+comes from classify (seasonal='', FG=_fine_grained, concat=_concat).
+
+Outputs
+-------
+  training_curves_{N}d_{focal|ce}[suffix]/
+  results_{N}d_{focal|ce}[suffix].pkl
+"""
 
 import os
 import pickle as pl
@@ -32,14 +47,19 @@ from constants import BINNING_FINE_GRAINED, FINE_GRAINED_OUTPUT_SUFFIX
 
 
 class EmbeddingDataset(Dataset):
+    """Indexable (embedding, label) pairs for DataLoader."""
+
     def __init__(self, embedding_matrix, labels):
+        """Store N×D embeddings and N labels as float tensors."""
         self.embeddings = torch.FloatTensor(embedding_matrix)
         self.labels = torch.FloatTensor(labels)
 
     def __len__(self):
+        """Number of windows in this split."""
         return len(self.labels)
 
     def __getitem__(self, idx):
+        """Return (embedding, label) for one window."""
         return self.embeddings[idx], self.labels[idx]
 
 
@@ -53,6 +73,7 @@ class Classifier(nn.Module):
     """MLP head: embedding dim → 512 → 256 → 1 logit."""
 
     def __init__(self, dim, hidden=512, positive_ratio=None):
+        """Build the MLP; optional last-layer bias from train-fold prevalence."""
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(dim, hidden),
@@ -63,12 +84,13 @@ class Classifier(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden // 2, 1),
         )
+        # Bias init matches train-fold prevalence so the first logit is not ~0.5.
         if positive_ratio is not None:
             with torch.no_grad():
                 self.net[-1].bias.fill_(_output_bias_from_prevalence(positive_ratio))
 
     def forward(self, x):
-        # squeeze(-1) keeps batch dim when batch_size == 1
+        """Logits of shape (batch,). squeeze(-1) keeps dim when batch_size == 1."""
         return self.net(x.view(x.size(0), -1)).squeeze(-1)
 
 
@@ -85,6 +107,7 @@ class UniformClassBatchSampler(Sampler):
     """
 
     def __init__(self, labels, batch_size, positive_ratio=None):
+        """Index positives/negatives once; batch count is ceil(N / batch_size)."""
         self.labels = np.asarray(labels)
         self.batch_size = batch_size
         self.positive_ratio = positive_ratio
@@ -96,6 +119,7 @@ class UniformClassBatchSampler(Sampler):
         self.num_batches = math.ceil(self.num_samples / self.batch_size)
 
     def _target_positives_per_batch(self):
+        """Hard cap of positives per batch when positive_ratio is set."""
         if self.positive_ratio is None:
             return None
         return min(int(round(self.positive_ratio * self.batch_size)), self.batch_size)
@@ -125,6 +149,7 @@ class UniformClassBatchSampler(Sampler):
         return batch_pos
 
     def __iter__(self):
+        """Yield one shuffled batch of indices per epoch pass."""
         positive_indices = self.positive_indices.copy()
         negative_indices = self.negative_indices.copy()
 
@@ -150,6 +175,7 @@ class UniformClassBatchSampler(Sampler):
                 yield batch
 
     def __len__(self):
+        """Number of batches DataLoader should draw this epoch."""
         return self.num_batches
 
 
@@ -164,6 +190,7 @@ def _focal_alpha(labels):
 
 
 def _batch_loss(logits, labels, use_focal_loss, alpha, gamma):
+    """Mean focal or BCE-with-logits over the batch (shared train/eval path)."""
     if use_focal_loss:
         return sigmoid_focal_loss(
             logits, labels, alpha=alpha, gamma=gamma, reduction='mean'
@@ -253,6 +280,7 @@ def _evaluate(model, loader, device):
 
 
 def _save_loss_curve(train_losses, val_losses, val_epochs, path):
+    """Per-fold train (every epoch) and val (every 5 epochs) loss PNG."""
     train_epochs = np.arange(1, len(train_losses) + 1)
     plt.figure(figsize=(8, 5))
     plt.plot(train_epochs, train_losses, label='Train (every epoch)')
@@ -268,6 +296,7 @@ def _save_loss_curve(train_losses, val_losses, val_epochs, path):
 
 
 def _save_interval_loss_curve(interval_losses, path):
+    """Per-fold mean loss over successive 5-batch windows."""
     intervals = np.arange(1, len(interval_losses) + 1)
     plt.figure(figsize=(8, 5))
     plt.plot(intervals, interval_losses)
@@ -483,6 +512,7 @@ def _save_confusion_matrix_plot(counts, path, title):
 
 
 def _save_cumulative_confusion_matrix(labels, probs, output_dir, threshold):
+    """Pool all-fold labels/probs, then one CM at the given probability threshold."""
     labels_cumulative = np.array([])
     probs_cumulative = np.array([])
     
@@ -625,6 +655,11 @@ def k_fold_cv(
     output_dir=None,
     batch_positive_ratio=None,
 ):
+    """Grouped k-fold MLP on stacked embedding vectors.
+
+    Splits by baby_id so the same infant cannot appear in train and val.
+    Concat heads just have a wider dim; fold logic is unchanged.
+    """
     if len(embeddings) == 0:
         tprint('No embeddings to train on!')
         return None, None, None, None, None, None
@@ -633,6 +668,7 @@ def k_fold_cv(
         os.makedirs(output_dir, exist_ok=True)
 
     labels = np.asarray(labels, dtype=int)
+    # Flatten so seasonal and seasonal∥FG both look like (N, D).
     embedding_matrix = np.stack([np.asarray(e, dtype=np.float32).flatten() for e in embeddings])
     dim = embedding_matrix.shape[1]
 
@@ -663,6 +699,7 @@ def k_fold_cv(
     fold_metrics, fold_curve_data = [], []
     fold_y_true, fold_y_probs = [], []
 
+    # One model per fold; val metrics use the last epoch's weights.
     for fold, (train_idx, val_idx) in enumerate(split_iter):
         if baby_ids is not None:
             train_babies = set(baby_ids[train_idx])
@@ -689,6 +726,7 @@ def k_fold_cv(
         train_losses, val_losses, val_epochs = [], [], []
         train_interval_losses = []
 
+        # Val loss is sampled every 5 epochs to keep the inner loop cheap.
         for epoch in range(1, epochs + 1):
             train_losses.append(_run_epoch( model, train_loader, device, optimizer, use_focal_loss, alpha, gamma, train_interval_losses))
             
@@ -743,6 +781,7 @@ def k_fold_cv(
     fold_probabilities_path = None
 
     if output_dir and fold_curve_data:
+        # Pooled-probability plots; CM uses the PR-derived ~80% recall threshold.
         fold_pr_curves = [fd['pr_curve'] for fd in fold_curve_data]
         fold_roc_curves = [fd['roc_curve'] for fd in fold_curve_data]
         
@@ -785,11 +824,18 @@ def train_and_save_results(
     lr=0.001,
     batch_positive_ratio=None,
     binning_mode='seasonal',
+    output_suffix='',
 ):
+    """Train one threshold and write results/curves using the classify suffix.
+
+    If output_suffix is set (preferred), it names artifacts. Else fall back
+    to fine-grained-from-binning_mode so older call sites stay valid.
+    """
     tprint(f"\n{'=' * 80}\nThreshold: {threshold_days} days ({loss_name})\n{'=' * 80}")
 
     labels_arr = np.asarray(labels, dtype=int)
     dataset_pos_rate = float(labels_arr.mean())
+    # Cap at 1.0 so a high-prevalence threshold cannot request >100% positives.
     if batch_positive_ratio is None:
         batch_positive_ratio = min(2.0 * dataset_pos_rate, 1.0)
     tprint(
@@ -798,7 +844,11 @@ def train_and_save_results(
     )
 
     loss_suffix = 'focal' if use_focal_loss else 'ce'
-    bin_suffix = FINE_GRAINED_OUTPUT_SUFFIX if binning_mode == BINNING_FINE_GRAINED else ''
+    # Explicit suffix from main (incl. _concat) overrides mode-only naming.
+    if output_suffix:
+        bin_suffix = output_suffix
+    else:
+        bin_suffix = FINE_GRAINED_OUTPUT_SUFFIX if binning_mode == BINNING_FINE_GRAINED else ''
     output_dir = f'training_curves_{threshold_days}d_{loss_suffix}{bin_suffix}'
 
 

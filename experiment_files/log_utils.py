@@ -1,4 +1,10 @@
-"""Timestamped print helper for cluster logs (HTCondor stdout)."""
+"""Timestamped stdout for HTCondor / cluster logs.
+
+Pipeline role
+-------------
+Used by Steps 1–5 so progress lines are flushed and time-stamped. Not a
+pipeline step.
+"""
 
 from datetime import datetime
 

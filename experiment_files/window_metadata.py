@@ -1,4 +1,4 @@
-"""Step 1: Generate window metadata for all babies.
+"""Step 1: Enumerate candidate 80h windows for every baby .mat file.
 
 Pipeline role
 -------------
