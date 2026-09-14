@@ -14,13 +14,13 @@ Commands
   classify --head concat
       Inner-join both caches (seasonal ∥ FG). --mode is unused.
 
-Outputs (via callees; cwd-relative except data/ pickles)
+Outputs (via callees; paths from repo root via __file__, not cwd)
 --------------------------------------------------------
   data/window_metadata.pkl, windows_to_embed.pkl, sampled_windows_all_thresholds.pkl
   data/embeddings_global[_fine_grained].pkl
-  labels_{N}d[_fine_grained|_concat].pkl
-  results_{N}d_{focal|ce}[_fine_grained|_concat].pkl
-  training_curves_{N}d_{focal|ce}[…]
+  results/labels_{N}d[_fine_grained|_concat].pkl
+  results/results_{N}d_{focal|ce}[_fine_grained|_concat].pkl
+  results/training_curves_{N}d_{focal|ce}[…]
 """
 
 import argparse

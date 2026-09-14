@@ -10,6 +10,12 @@ Not a runnable step. Values below are the contract for pickle names and
 window keys; changing them invalidates existing caches unless you regenerate.
 """
 
+from pathlib import Path
+
+# Repo root from this file (not cwd), same pattern as DATA_DIR in the step modules.
+REPO_ROOT = Path(__file__).resolve().parent.parent
+RESULTS_DIR = (REPO_ROOT / "results").resolve()
+
 # =============================================================================
 # Constants and paths
 # =============================================================================
@@ -50,8 +56,8 @@ BINNING_CHOICES = (BINNING_SEASONAL, BINNING_FINE_GRAINED)
 
 # Fine-grained: last C seconds of the same 80h sample, equal bins of W seconds.
 # Chronos length = FG_CONTEXT_SIZE_SECONDS // FG_WINDOW_SIZE_SECONDS (tune this pair).
-FG_CONTEXT_SIZE_SECONDS = 7680   # 2 hours
-FG_WINDOW_SIZE_SECONDS = 8
+FG_CONTEXT_SIZE_SECONDS = 11520
+FG_WINDOW_SIZE_SECONDS = 12
 NUM_WINDOWS_FG = FG_CONTEXT_SIZE_SECONDS // FG_WINDOW_SIZE_SECONDS
 
 # Separate embedding caches per binning mode (window pickles are shared)

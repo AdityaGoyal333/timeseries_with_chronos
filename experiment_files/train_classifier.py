@@ -11,8 +11,8 @@ comes from classify (seasonal='', FG=_fine_grained, concat=_concat).
 
 Outputs
 -------
-  training_curves_{N}d_{focal|ce}[suffix]/
-  results_{N}d_{focal|ce}[suffix].pkl
+  results/training_curves_{N}d_{focal|ce}[suffix]/
+  results/results_{N}d_{focal|ce}[suffix].pkl
 """
 
 import os
@@ -43,7 +43,7 @@ from torch.utils.data import Sampler
 
 from log_utils import tprint
 
-from constants import BINNING_FINE_GRAINED, FINE_GRAINED_OUTPUT_SUFFIX
+from constants import BINNING_FINE_GRAINED, FINE_GRAINED_OUTPUT_SUFFIX, RESULTS_DIR
 
 
 class EmbeddingDataset(Dataset):
@@ -819,9 +819,9 @@ def train_and_save_results(
     gamma=2.0,
     loss_name='Focal Loss',
     k=5,
-    epochs=250,
+    epochs=30,
     batch_size=400,
-    lr=0.001,
+    lr=0.0006,
     batch_positive_ratio=None,
     binning_mode='seasonal',
     output_suffix='',
@@ -849,9 +849,9 @@ def train_and_save_results(
         bin_suffix = output_suffix
     else:
         bin_suffix = FINE_GRAINED_OUTPUT_SUFFIX if binning_mode == BINNING_FINE_GRAINED else ''
-    output_dir = f'training_curves_{threshold_days}d_{loss_suffix}{bin_suffix}'
-
-
+    # Repo results/ from __file__, not cwd (same rule as data/).
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    output_dir = str(RESULTS_DIR / f'training_curves_{threshold_days}d_{loss_suffix}{bin_suffix}')
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Kfold device: {device}")
@@ -872,7 +872,7 @@ def train_and_save_results(
         batch_positive_ratio=batch_positive_ratio,
     )
 
-    filename = f'results_{threshold_days}d_{loss_suffix}{bin_suffix}.pkl'
+    filename = str(RESULTS_DIR / f'results_{threshold_days}d_{loss_suffix}{bin_suffix}.pkl')
     with open(filename, 'wb') as f:
         pl.dump(
             {

@@ -1,3 +1,6 @@
+import argparse
+from pathlib import Path
+
 import numpy as np
 import scipy
 from collections import OrderedDict
@@ -6,6 +9,12 @@ import pandas as pd
 import traceback
 import pickle as pl
 import glob
+
+# Seconds; same list as the old commented __main__ default.
+DEFAULT_WINDOW_SIZES = [
+    1, 2, 3, 4, 5, 10, 20, 24, 32, 44, 58, 78, 105, 141, 188, 252, 300,
+    1083, 1940, 3000,
+]
 
 
 def analyze_coverage_non_optimal( all_timestamps, results, wsize, final_arr, birthtime, deathtime, debug_output=False):
@@ -179,6 +188,121 @@ def analyze_baby_window_coverage(mat_file_path, window_sizes,optimized,debug_out
     return results
 
 
+def analyze_coverage_non_optimal_context(
+    all_timestamps, results, wsize, final_arr, birthtime, deathtime, debug_output=False,
+):
+    """Same hit/miss math; first_overall is period start (birthtime), not vt[0]."""
+    valid_timestamps = all_timestamps[final_arr]
+    valid_timestamps = valid_timestamps[
+        (valid_timestamps >= birthtime) & (valid_timestamps < deathtime)
+    ]
+    total_windows = int(np.floor((deathtime - birthtime) / wsize)) + 1
+    if len(valid_timestamps) == 0:
+        results[wsize] = {
+            "hits": 0,
+            "misses": total_windows,
+            "total_windows": total_windows,
+            "coverage_rate": 0,
+        }
+        return
+
+    first_overall = birthtime
+    hits = 0
+    for window_idx in range(total_windows):
+        window_start = first_overall + window_idx * wsize
+        window_end = window_start + wsize
+        timestamps_in_window = valid_timestamps[
+            (valid_timestamps >= window_start) & (valid_timestamps < window_end)
+        ]
+        if len(timestamps_in_window) > 0:
+            hits += 1
+
+    results[wsize] = {
+        "hits": hits,
+        "misses": total_windows - hits,
+        "total_windows": total_windows,
+        "coverage_rate": hits / total_windows if total_windows > 0 else 0,
+    }
+
+
+def analyze_coverage_vectorized_context(
+    all_timestamps, results, wsize, final_arr, birthtime, deathtime, debug_output=False,
+):
+    """Same as vectorized coverage; first_overall is period start (birthtime)."""
+    valid_timestamps = all_timestamps[final_arr]
+    valid_timestamps = valid_timestamps[
+        (valid_timestamps >= birthtime) & (valid_timestamps < deathtime)
+    ]
+    total_windows = int(np.floor((deathtime - birthtime) / wsize)) + 1
+    if len(valid_timestamps) == 0:
+        results[wsize] = {
+            "hits": 0,
+            "misses": total_windows,
+            "total_windows": total_windows,
+            "coverage_rate": 0,
+        }
+        return
+
+    first_overall = birthtime
+    window_indices = np.floor((valid_timestamps - first_overall) / wsize).astype(int)
+    hits = len(np.unique(window_indices))
+    results[wsize] = {
+        "hits": hits,
+        "misses": total_windows - hits,
+        "total_windows": total_windows,
+        "coverage_rate": hits / total_windows if total_windows > 0 else 0,
+    }
+
+
+def analyze_baby_window_coverage_context(
+    mat_file_path, window_sizes, optimized, context_size, debug_output=False,
+):
+    """Coverage on the last context_size seconds of vt (end = last timestamp).
+
+    Reuses birthtime/deathtime as that period. Bins start at period start.
+    """
+    mat_data = scipy.io.loadmat(mat_file_path)
+    vname = list(mat_data['vname'])
+    pname = list(mat_data['pname'])
+    valid_timestamps = mat_data['vt']
+
+    if 'BirthTime' not in pname or 'Age at Death' not in pname:
+        raise Exception(f"{mat_file_path}: File does not have birth or age at death")
+    if 'HR' not in vname or 'SPO2-%' not in vname:
+        raise Exception(f"{mat_file_path}: File does not have HR or SPO2")
+
+    if (vname[0][0][0] == 'HR') and (vname[2][0][0] == 'SPO2-%'):
+        hr_cols = mat_data['vdata'][:, 0]
+        spo2_cols = mat_data['vdata'][:, 2]
+    else:
+        hr_cols = mat_data['vdata'][:, vname.index('HR')]
+        spo2_cols = mat_data['vdata'][:, vname.index('SPO2-%')]
+
+    final_arr = ~np.isnan(hr_cols) & ~np.isnan(spo2_cols)
+
+    end = valid_timestamps[-1].item()
+    start = end - context_size
+    first_vt = valid_timestamps[0].item()
+    if start < first_vt:
+        start = first_vt
+
+    birthtime = start
+    deathtime = end
+
+    if debug_output:
+        print(f"context period: [{start}, {end})  k={context_size}", flush=True)
+
+    results = {}
+    for wsize in window_sizes:
+        if optimized:
+            analyze_coverage_vectorized_context(
+                valid_timestamps, results, wsize, final_arr, birthtime, deathtime,
+            )
+        else:
+            analyze_coverage_non_optimal_context(
+                valid_timestamps, results, wsize, final_arr, birthtime, deathtime,
+            )
+    return results
 
 
 def save_results_to_pickle(summary_df, baby_results, window_sizes,filename):
@@ -197,7 +321,9 @@ def save_results_to_pickle(summary_df, baby_results, window_sizes,filename):
     
 
 # here workers means threads
-def analyze_all_babies_windows(window_sizes, mat_files, optimized, filename, max_workers=30):
+def analyze_all_babies_windows(
+    window_sizes, mat_files, optimized, filename, max_workers=30, context_size=None,
+):
     """
     Analyze window coverage for all babies concurrently.
 
@@ -211,15 +337,24 @@ def analyze_all_babies_windows(window_sizes, mat_files, optimized, filename, max
     print(
         f"Analyzing {len(mat_files)} babies "
         f"with window sizes: {window_sizes}"
+        + (f"  context_size={context_size}" if context_size is not None else "")
     )
 
     def analyze_one_baby(index, file_path):
         """Run in a worker thread."""
-        baby_result = analyze_baby_window_coverage(
-            file_path,
-            window_sizes,
-            optimized,
-        )
+        if context_size is None:
+            baby_result = analyze_baby_window_coverage(
+                file_path,
+                window_sizes,
+                optimized,
+            )
+        else:
+            baby_result = analyze_baby_window_coverage_context(
+                file_path,
+                window_sizes,
+                optimized,
+                context_size,
+            )
 
         baby_id = file_path.split("/")[-1]
 
@@ -279,28 +414,38 @@ def analyze_all_babies_windows(window_sizes, mat_files, optimized, filename, max
 
 
 
-def run_non_optimal_analysis(window_sizes,mat_files):
+def run_non_optimal_analysis(window_sizes, mat_files, context_size=None):
     """Thread function for non-optimal analysis"""
     filename = 'results_non_optimal.pkl'
     print("Starting non-optimal analysis...")
-    summary_df, baby_results = analyze_all_babies_windows(window_sizes, mat_files, False, filename)
+    summary_df, baby_results = analyze_all_babies_windows(
+        window_sizes, mat_files, False, filename, context_size=context_size,
+    )
     save_results_to_pickle(summary_df, baby_results, window_sizes, filename=filename)
     print("Non-optimal analysis completed!")
 
 
-def run_vectorized_analysis(window_sizes,mat_files):
+def run_vectorized_analysis(window_sizes, mat_files, context_size=None):
     """Thread function for vectorized analysis"""
-    filename = 'results_vectorized.pkl'
+    filename = (
+        'results_vectorized_context.pkl' if context_size is not None
+        else 'results_vectorized.pkl'
+    )
     print("Starting vectorized analysis...")
-    summary_df, baby_results = analyze_all_babies_windows(window_sizes, mat_files, True, filename)
+    summary_df, baby_results = analyze_all_babies_windows(
+        window_sizes, mat_files, True, filename, context_size=context_size,
+    )
     save_results_to_pickle(summary_df, baby_results, window_sizes, filename=filename)
     print("Vectorized analysis completed!")
+
+
+def _parse_window_sizes(text):
+    return [int(part.strip()) for part in text.split(',') if part.strip()]
     
     
 
 if __name__ == "__main__":
-    
-    
+
     """
     for validating both the optimal and vectorized implementations (already done)
     """
@@ -318,21 +463,48 @@ if __name__ == "__main__":
     # thread_vectorized.join()
 
     # print("Both analyses completed!")
-    
+
     # arr = [int(math.pow(1.338,x)) for x in range(20,30)]
-    
-    
+
+
     """
     for running for a group of mat files and window sizes
     """
     # mat_files = set(sorted(glob.glob('./data/download/Vitals/*.mat')))
-    # window_sizes = [1, 2, 3, 4, 5, 10, 20, 24, 32, 44, 58, 78, 105, 141, 188, 252, 300, 1083, 1940, 3000] 
+    # window_sizes = [1, 2, 3, 4, 5, 10, 20, 24, 32, 44, 58, 78, 105, 141, 188, 252, 300, 1083, 1940, 3000]
     # run_vectorized_analysis(window_sizes,mat_files)
-    
-    
+
+
     """
     for testing
     """
     # print(analyze_baby_window_coverage('/Users/adityagoyal/Desktop/Research - yin li/timeseries_project/timeseries_with_chronos/data/download/Vitals/NICU_5480_vitals.mat', [50],True,True))
-    
-    
+
+    repo_root = Path(__file__).resolve().parent.parent
+    default_mats = str(repo_root / "data" / "download" / "Vitals" / "*.mat")
+
+    parser = argparse.ArgumentParser(description="Vital-sign window coverage (hit rate)")
+    parser.add_argument(
+        "--window-sizes",
+        default=",".join(str(s) for s in DEFAULT_WINDOW_SIZES),
+        help="Comma-separated bin widths in seconds",
+    )
+    parser.add_argument(
+        "--context-size",
+        type=float,
+        default=None,
+        help="If set, last k seconds of vt (new function). If omitted, birth-to-death.",
+    )
+    parser.add_argument(
+        "--mats",
+        default=default_mats,
+        help="Glob for .mat files",
+    )
+    args = parser.parse_args()
+
+    window_sizes = _parse_window_sizes(args.window_sizes)
+    mat_files = set(sorted(glob.glob(args.mats)))
+    if not mat_files:
+        raise SystemExit(f"No .mat files matched: {args.mats}")
+
+    run_vectorized_analysis(window_sizes, mat_files, context_size=args.context_size) 

@@ -20,7 +20,7 @@ Outputs
   data/embeddings_global.pkl
   data/embeddings_global_fine_grained.pkl
   data/windows_missing_embeddings[_fine_grained].pkl
-  labels_{N}d[_fine_grained|_concat].pkl
+  results/labels_{N}d[_fine_grained|_concat].pkl
 """
 
 import os
@@ -45,12 +45,30 @@ from constants import (
     HEAD_CONCAT,
     MISSING_WINDOWS_PATHS,
     NUM_WINDOWS_FG,
+    RESULTS_DIR,
     WINDOW_SIZE_SECONDS,
 )
 from log_utils import tprint
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = (BASE_DIR / "data").resolve()
+VITALS_DIR = (DATA_DIR / "download" / "Vitals").resolve()
+
+
+def baby_id_from_mat_ref(mat_ref):
+    """Accept a baby id or a leftover path; return the id (filename without .mat)."""
+    return Path(str(mat_ref)).name.replace('.mat', '')
+
+
+def resolve_mat_path(mat_ref):
+    """Absolute .mat path under data/download/Vitals from baby id (or old path)."""
+    return VITALS_DIR / f"{baby_id_from_mat_ref(mat_ref)}.mat"
+
+
+def labels_output_path(threshold_days, suffix):
+    """Absolute path under repo results/ for a labels pickle; create the dir."""
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    return RESULTS_DIR / f'labels_{threshold_days}d{suffix}.pkl'
 
 
 def output_suffix(binning_mode=None, head=None):
@@ -210,7 +228,7 @@ def baby_id_from_window_key(key):
 
 def create_window_key(mat_file, window_start, window_end):
     """Stable cache key: baby + 80h window bounds (not the FG load_start)."""
-    baby_id = mat_file.split('/')[-1].replace('.mat', '')
+    baby_id = baby_id_from_mat_ref(mat_file)
     return f"{baby_id}_{int(window_start)}_{int(window_end)}"
 
 
@@ -308,7 +326,7 @@ def generate_missing_embeddings(missing_df, cache, pipeline, cache_path, binning
                 binning_mode, row['window_start'], row['window_end']
             )
             result = create_windowed_features(
-                row['mat_file'],
+                str(resolve_mat_path(row['mat_file'])),
                 load_start,
                 context_size,
                 window_size,
@@ -319,7 +337,8 @@ def generate_missing_embeddings(missing_df, cache, pipeline, cache_path, binning
                 new_since_save += 1
             else:
                 failed += 1
-        except Exception:
+        except Exception as e:
+            print(e)
             failed += 1
 
         # Incremental save: long CHTC jobs can be preempted mid-loop.
@@ -404,7 +423,7 @@ def prepare_training_data_for_threshold(
     Writes labels_{N}d[_fine_grained].pkl. Does not recompute labels.
     """
     suffix = output_suffix(binning_mode)
-    labels_path = f'labels_{threshold_days}d{suffix}.pkl'
+    labels_path = labels_output_path(threshold_days, suffix)
 
     tprint(f"\nPreparing {threshold_days}-day threshold (binning={binning_mode})...")
 
@@ -445,7 +464,7 @@ def prepare_concat_training_data_for_threshold(threshold_days, samples_windows_p
     Incomplete keys are dropped (counts printed). Writes labels_{N}d_concat.pkl.
     """
     suffix = output_suffix(head=HEAD_CONCAT)
-    labels_path = f'labels_{threshold_days}d{suffix}.pkl'
+    labels_path = labels_output_path(threshold_days, suffix)
 
     seasonal_cache = load_embeddings_cache(cache_paths(BINNING_SEASONAL)[0])
     fg_cache = load_embeddings_cache(cache_paths(BINNING_FINE_GRAINED)[0])
@@ -492,7 +511,7 @@ def load_training_data_for_threshold(threshold_days, binning_mode):
     Does not handle concat (those vectors are not stored in one cache).
     """
     suffix = output_suffix(binning_mode)
-    labels_path = f'labels_{threshold_days}d{suffix}.pkl'
+    labels_path = labels_output_path(threshold_days, suffix)
 
     tprint(f"\nLoading {threshold_days}-day threshold from {labels_path}...")
 

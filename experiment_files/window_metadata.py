@@ -93,7 +93,8 @@ def generate_window_metadata_for_baby(mat_file_path, overlap_percentage, max_win
         # Safety check: int/float rounding can push window_end past last_ts
         if window_end <= last_ts:
             windows.append({
-                'mat_file': mat_file_path,
+                # Identity only; training_data.resolve_mat_path finds the .mat.
+                'mat_file': baby_id,
                 'baby_id': baby_id,
                 'window_start': window_start,   # absolute timestamp (seconds)
                 'window_end': window_end,       # absolute timestamp (seconds)
