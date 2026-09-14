@@ -60,6 +60,12 @@ FG_CONTEXT_SIZE_SECONDS = 11520
 FG_WINDOW_SIZE_SECONDS = 12
 NUM_WINDOWS_FG = FG_CONTEXT_SIZE_SECONDS // FG_WINDOW_SIZE_SECONDS
 
+# FG region = last FG_LOOKBACK_SECONDS before window_end. Each Chronos call
+# still sees only C seconds; NUM_FG_EMBEDDINGS starts are drawn uniformly
+# in [window_end - lookback, window_end - C] (seeded per 80h window).
+FG_LOOKBACK_SECONDS = 10 * 3600
+NUM_FG_EMBEDDINGS = 4
+
 # Separate embedding caches per binning mode (window pickles are shared)
 EMBEDDINGS_CACHE_PATHS = {
     BINNING_SEASONAL: 'embeddings_global.pkl',

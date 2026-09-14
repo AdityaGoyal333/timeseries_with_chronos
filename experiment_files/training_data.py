@@ -2,10 +2,11 @@
 
 Pipeline role
 -------------
-Step 3:  Run Chronos-2 on each unique sampled window → one vector per 80h
-         key. Separate pickles per binning mode; keys are shared.
-Step 4:  Filter sampled_windows_all_thresholds to one threshold and attach
-         vectors (singular: one cache; concat: seasonal then FG).
+Step 3:  Seasonal: one vector per 80h key. FG: one vector per overlapping
+         slice key (80h bounds + fg_start/fg_end) inside the lookback.
+Step 4:  Labels table is the roster. Cache lookup only — no slice geometry.
+         Singular seasonal: one row per 80h key. Singular FG / concat: one
+         row per FG cache key that belongs to that 80h window.
 
 Called from main.train (Step 3) and main.classify (Step 4). Does not train
 the MLP.
@@ -13,7 +14,8 @@ the MLP.
 Binning
 -------
   seasonal      — [window_start, +80h), WINDOW_SIZE_SECONDS bins
-  fine_grained  — [window_end - FG_CONTEXT, window_end), FG_WINDOW bins
+  fine_grained  — K random FG_CONTEXT slices in the last FG_LOOKBACK seconds;
+                  each slice ends at or before window_end
 
 Outputs
 -------
@@ -23,6 +25,7 @@ Outputs
   results/labels_{N}d[_fine_grained|_concat].pkl
 """
 
+import hashlib
 import os
 import pickle as pl
 from pathlib import Path
@@ -40,10 +43,12 @@ from constants import (
     CONTEXT_SIZE_SECONDS,
     EMBEDDINGS_CACHE_PATHS,
     FG_CONTEXT_SIZE_SECONDS,
+    FG_LOOKBACK_SECONDS,
     FG_WINDOW_SIZE_SECONDS,
     FINE_GRAINED_OUTPUT_SUFFIX,
     HEAD_CONCAT,
     MISSING_WINDOWS_PATHS,
+    NUM_FG_EMBEDDINGS,
     NUM_WINDOWS_FG,
     RESULTS_DIR,
     WINDOW_SIZE_SECONDS,
@@ -93,18 +98,21 @@ def cache_paths(binning_mode):
 
 
 def embed_slice(binning_mode, window_start, window_end):
-    """Return (load_start, context_seconds, bin_width) for this mode.
-
-    Fine-grained uses the tail of the same 80h sample so the last bin
-    lines up with window_end (the time the label is about).
-    """
-    if binning_mode == BINNING_FINE_GRAINED:
-        return (
-            window_end - FG_CONTEXT_SIZE_SECONDS,
-            FG_CONTEXT_SIZE_SECONDS,
-            FG_WINDOW_SIZE_SECONDS,
-        )
+    """Return (load_start, context_seconds, bin_width) for seasonal (full 80h)."""
     return window_start, CONTEXT_SIZE_SECONDS, WINDOW_SIZE_SECONDS
+
+
+def fg_slice_bounds(mat_file, window_start, window_end):
+    """K uniform starts on [we-lookback, we-C]; duplicates dropped; rng seeded by 80h key."""
+    end = int(window_end)
+    last_start = end - FG_CONTEXT_SIZE_SECONDS
+    first_start = end - FG_LOOKBACK_SECONDS
+    seed_key = create_window_key(mat_file, window_start, window_end)
+    seed = int.from_bytes(hashlib.md5(seed_key.encode()).digest()[:8], 'little')
+    rng = np.random.default_rng(seed)
+    starts = rng.integers(first_start, last_start + 1, size=NUM_FG_EMBEDDINGS)
+    starts = sorted(set(int(s) for s in starts))
+    return [(s, s + FG_CONTEXT_SIZE_SECONDS) for s in starts]
 
 
 def prepare_chronos_input(hr_windows, spo2_windows):
@@ -221,15 +229,33 @@ def create_windowed_features(mat_file_path, start_time, context_size, window_siz
     return create_windowed_features_from_raw(raw_data, window_size)
 
 
-def baby_id_from_window_key(key):
-    """Strip trailing _start_end; baby_id itself may contain underscores."""
-    return key.rsplit('_', 2)[0]
+def baby_id_from_window_key(key, binning_mode=BINNING_SEASONAL):
+    """Strip trailing timestamps: 4 for fine-grained slices, 2 for seasonal."""
+    drop = 4 if binning_mode == BINNING_FINE_GRAINED else 2
+    return key.rsplit('_', drop)[0]
 
 
 def create_window_key(mat_file, window_start, window_end):
-    """Stable cache key: baby + 80h window bounds (not the FG load_start)."""
+    """Seasonal cache key: baby + 80h window bounds."""
     baby_id = baby_id_from_mat_ref(mat_file)
     return f"{baby_id}_{int(window_start)}_{int(window_end)}"
+
+
+def create_fg_key(mat_file, window_start, window_end, fg_start, fg_end):
+    """FG cache key: 80h bounds plus this slice's [fg_start, fg_end)."""
+    return (
+        f"{create_window_key(mat_file, window_start, window_end)}"
+        f"_{int(fg_start)}_{int(fg_end)}"
+    )
+
+
+def index_fg_keys_by_80h(fg_cache):
+    """Map seasonal key baby_ws_we → FG slice keys stored for that window."""
+    index = {}
+    for key in fg_cache:
+        prefix = key.rsplit('_', 2)[0]
+        index.setdefault(prefix, []).append(key)
+    return index
 
 
 def ensure_numpy_pickle_compat():
@@ -280,24 +306,42 @@ def save_embeddings_cache(cache, cache_path):
     save_pickle(cache, cache_path)
 
 
-def detect_missing_windows(windows_df, cache):
-    """Rows whose 80h key is absent from this mode's cache (empty DF if none)."""
-    missing_indices = []
-    for idx, row in windows_df.iterrows():
-        key = create_window_key(row['mat_file'], row['window_start'], row['window_end'])
-        if key not in cache:
-            missing_indices.append(idx)
-    if not missing_indices:
-        return windows_df.iloc[0:0]
-    return windows_df.loc[missing_indices]
+def detect_missing_windows(windows_df, cache, binning_mode):
+    """Rows whose required cache key(s) are absent (empty DF if none).
+
+    Seasonal: one 80h key per row. FG: one row per missing slice, with
+    fg_start/fg_end so generate does not re-embed slices already in cache.
+    """
+    if binning_mode != BINNING_FINE_GRAINED:
+        missing_indices = []
+        for idx, row in windows_df.iterrows():
+            key = create_window_key(row['mat_file'], row['window_start'], row['window_end'])
+            if key not in cache:
+                missing_indices.append(idx)
+        if not missing_indices:
+            return windows_df.iloc[0:0]
+        return windows_df.loc[missing_indices]
+
+    records = []
+    for _, row in windows_df.iterrows():
+        for fg_start, fg_end in fg_slice_bounds(
+            row['mat_file'], row['window_start'], row['window_end']
+        ):
+            key = create_fg_key(
+                row['mat_file'], row['window_start'], row['window_end'], fg_start, fg_end
+            )
+            if key not in cache:
+                rec = row.to_dict()
+                rec['fg_start'] = fg_start
+                rec['fg_end'] = fg_end
+                records.append(rec)
+    if not records:
+        return pd.DataFrame(columns=list(windows_df.columns) + ['fg_start', 'fg_end']).drop_duplicates()
+    return pd.DataFrame(records).drop_duplicates()
 
 
 def generate_missing_embeddings(missing_df, cache, pipeline, cache_path, binning_mode, save_every=500):
-    """Embed missing rows for one mode; checkpoint the cache every save_every successes.
-
-    Failures (empty slice or exception) leave the key absent so classify can
-    drop that sample. Keys stay on the 80h window even when FG loads a tail.
-    """
+    """Embed missing keys; checkpoint every save_every successes (FG: per slice)."""
     total = len(missing_df)
     if total == 0:
         return cache
@@ -307,8 +351,8 @@ def generate_missing_embeddings(missing_df, cache, pipeline, cache_path, binning
     tprint(f"  Binning: {binning_mode}")
     if binning_mode == BINNING_FINE_GRAINED:
         tprint(
-            f"  FG slice: last {FG_CONTEXT_SIZE_SECONDS}s, "
-            f"bin {FG_WINDOW_SIZE_SECONDS}s → {NUM_WINDOWS_FG} steps"
+            f"  FG: last {FG_LOOKBACK_SECONDS}s, {NUM_FG_EMBEDDINGS} slices of "
+            f"{FG_CONTEXT_SIZE_SECONDS}s, bin {FG_WINDOW_SIZE_SECONDS}s → {NUM_WINDOWS_FG} steps"
         )
     tprint("=" * 80 + "\n")
     tprint(f"Generating {total} missing embeddings (checkpoint every {save_every})...\n")
@@ -319,12 +363,23 @@ def generate_missing_embeddings(missing_df, cache, pipeline, cache_path, binning
     new_since_save = 0
 
     for i, (_, row) in enumerate(missing_df.iterrows()):
-        key = create_window_key(row['mat_file'], row['window_start'], row['window_end'])
-        try:
-            # FG: [window_end - C, window_end); seasonal: full [window_start, +80h).
+        if binning_mode == BINNING_FINE_GRAINED:
+            key = create_fg_key(
+                row['mat_file'],
+                row['window_start'],
+                row['window_end'],
+                row['fg_start'],
+                row['fg_end'],
+            )
+            load_start = int(row['fg_start'])
+            context_size = FG_CONTEXT_SIZE_SECONDS
+            window_size = FG_WINDOW_SIZE_SECONDS
+        else:
+            key = create_window_key(row['mat_file'], row['window_start'], row['window_end'])
             load_start, context_size, window_size = embed_slice(
                 binning_mode, row['window_start'], row['window_end']
             )
+        try:
             result = create_windowed_features(
                 str(resolve_mat_path(row['mat_file'])),
                 load_start,
@@ -341,7 +396,6 @@ def generate_missing_embeddings(missing_df, cache, pipeline, cache_path, binning
             print(e)
             failed += 1
 
-        # Incremental save: long CHTC jobs can be preempted mid-loop.
         if new_since_save >= save_every:
             save_embeddings_cache(cache, cache_path)
             tprint(f"  💾 Checkpoint at {i + 1}/{total} (cache: {len(cache)}, +{new_since_save} new)")
@@ -377,15 +431,19 @@ def ensure_embeddings_for_windows(windows_df, binning_mode, save_every=500):
 
     cache = load_embeddings_cache(embeddings_path)
 
-    # Compare required 80h keys to this mode's pickle only.
     tprint("STEP 3a: Detecting missing embeddings...")
-    missing_df = detect_missing_windows(windows_df, cache)
-    n_total = len(windows_df)
+    missing_df = detect_missing_windows(windows_df, cache, binning_mode)
+    if binning_mode == BINNING_FINE_GRAINED:
+        n_required = len(windows_df) * NUM_FG_EMBEDDINGS
+        unit = 'slices'
+    else:
+        n_required = len(windows_df)
+        unit = 'windows'
     n_missing = len(missing_df)
 
     tprint(f"  ✓ Global cache: {len(cache)} embeddings")
-    tprint(f"  ✓ Windows required: {n_total}")
-    tprint(f"  ✓ Already in cache: {n_total - n_missing}")
+    tprint(f"  ✓ {unit.capitalize()} required: {n_required}")
+    tprint(f"  ✓ Already in cache: {n_required - n_missing}")
     tprint(f"  ✓ Missing: {n_missing}")
 
     missing_df.to_pickle(missing_path)
@@ -408,9 +466,9 @@ def ensure_embeddings_for_windows(windows_df, binning_mode, save_every=500):
         missing_df, cache, pipeline, embeddings_path, binning_mode, save_every=save_every
     )
 
-    still_missing = len(detect_missing_windows(windows_df, cache))
+    still_missing = len(detect_missing_windows(windows_df, cache, binning_mode))
     if still_missing:
-        tprint(f"⚠ Warning: {still_missing} windows still missing after generation\n")
+        tprint(f"⚠ Warning: {still_missing} {unit} still missing after generation\n")
 
     return cache
 
@@ -418,9 +476,9 @@ def ensure_embeddings_for_windows(windows_df, binning_mode, save_every=500):
 def prepare_training_data_for_threshold(
     threshold_days, samples_windows_path, binning_mode, embeddings_cache=None
 ):
-    """Step 4 singular: join Step 2 labels to one mode cache; drop missing keys.
+    """Step 4 singular: join Step 2 labels to whatever keys exist in this cache.
 
-    Writes labels_{N}d[_fine_grained].pkl. Does not recompute labels.
+    Seasonal: one row per 80h key. FG: one row per stored slice for that 80h window.
     """
     suffix = output_suffix(binning_mode)
     labels_path = labels_output_path(threshold_days, suffix)
@@ -437,14 +495,25 @@ def prepare_training_data_for_threshold(
     embedding_keys = []
     labels = []
     baby_ids = []
+    fg_index = (
+        index_fg_keys_by_80h(embeddings_cache)
+        if binning_mode == BINNING_FINE_GRAINED
+        else None
+    )
 
-    # Keep a row only if this mode already has a vector for that 80h key.
     for _, row in threshold_data.iterrows():
-        key = create_window_key(row['mat_file'], row['window_start'], row['window_end'])
-        if key in embeddings_cache:
+        baby_id = baby_id_from_mat_ref(row['mat_file'])
+        window_key = create_window_key(
+            row['mat_file'], row['window_start'], row['window_end']
+        )
+        if binning_mode == BINNING_FINE_GRAINED:
+            slice_keys = fg_index.get(window_key, [])
+        else:
+            slice_keys = [window_key] if window_key in embeddings_cache else []
+        for key in slice_keys:
             embedding_keys.append(key)
             labels.append(int(row['label']))
-            baby_ids.append(baby_id_from_window_key(key))
+            baby_ids.append(baby_id)
 
     tprint(f"  ✓ {len(embedding_keys)} samples (L0:{labels.count(0)}, L1:{labels.count(1)})")
     tprint(f"  ✓ {len(set(baby_ids))} unique babies")
@@ -459,22 +528,20 @@ def prepare_training_data_for_threshold(
 
 
 def prepare_concat_training_data_for_threshold(threshold_days, samples_windows_path):
-    """Step 4 concat: inner-join both caches; vector is seasonal then FG.
+    """Step 4 concat: labels table + cache lookup. No slice geometry here.
 
-    Incomplete keys are dropped (counts printed). Writes labels_{N}d_concat.pkl.
+    One row per FG cache key for that 80h window, if the seasonal 80h vector exists.
     """
     suffix = output_suffix(head=HEAD_CONCAT)
     labels_path = labels_output_path(threshold_days, suffix)
 
     seasonal_cache = load_embeddings_cache(cache_paths(BINNING_SEASONAL)[0])
     fg_cache = load_embeddings_cache(cache_paths(BINNING_FINE_GRAINED)[0])
-    seasonal_keys = set(seasonal_cache)
-    fg_keys = set(fg_cache)
+    fg_index = index_fg_keys_by_80h(fg_cache)
 
     tprint(f"\nPreparing {threshold_days}-day threshold (head=concat)...")
-    tprint(f"  Keys only in seasonal: {len(seasonal_keys - fg_keys)}")
-    tprint(f"  Keys only in fine_grained: {len(fg_keys - seasonal_keys)}")
-    tprint(f"  Keys in both: {len(seasonal_keys & fg_keys)}")
+    tprint(f"  Seasonal cache: {len(seasonal_cache)}")
+    tprint(f"  Fine-grained cache: {len(fg_cache)}")
 
     sampled_all = pd.read_pickle(samples_windows_path)
     threshold_data = sampled_all[sampled_all['threshold_days'] == threshold_days]
@@ -483,19 +550,26 @@ def prepare_concat_training_data_for_threshold(threshold_days, samples_windows_p
     labels = []
     baby_ids = []
     embeddings = []
+    n_no_seasonal = 0
 
-    # Inner join on the shared 80h key; order is seasonal ∥ fine_grained.
     for _, row in threshold_data.iterrows():
-        key = create_window_key(row['mat_file'], row['window_start'], row['window_end'])
-        if key in seasonal_cache and key in fg_cache:
-            embedding_keys.append(key)
+        seasonal_key = create_window_key(
+            row['mat_file'], row['window_start'], row['window_end']
+        )
+        if seasonal_key not in seasonal_cache:
+            n_no_seasonal += 1
+            continue
+        baby_id = baby_id_from_mat_ref(row['mat_file'])
+        for fg_key in fg_index.get(seasonal_key, []):
+            embedding_keys.append(fg_key)
             labels.append(int(row['label']))
-            baby_ids.append(baby_id_from_window_key(key))
+            baby_ids.append(baby_id)
             embeddings.append(
-                np.concatenate([seasonal_cache[key], fg_cache[key]])
+                np.concatenate([seasonal_cache[seasonal_key], fg_cache[fg_key]])
             )
 
-    tprint(f"  ✓ {len(embedding_keys)} samples (L0:{labels.count(0)}, L1:{labels.count(1)})")
+    tprint(f"  ✓ 80h rows with no seasonal vector: {n_no_seasonal}")
+    tprint(f"  ✓ {len(embedding_keys)} concat samples (L0:{labels.count(0)}, L1:{labels.count(1)})")
     tprint(f"  ✓ {len(set(baby_ids))} unique babies")
 
     with open(labels_path, 'wb') as f:
@@ -525,7 +599,7 @@ def load_training_data_for_threshold(threshold_days, binning_mode):
     baby_ids = data.get('baby_ids')
     # Older pickles stored keys only; derive baby_id the same way as write path.
     if baby_ids is None:
-        baby_ids = [baby_id_from_window_key(key) for key in data['embedding_keys']]
+        baby_ids = [baby_id_from_window_key(key, binning_mode) for key in data['embedding_keys']]
 
     tprint(f"  ✓ Loaded {len(embeddings)} samples (L0:{labels.count(0)}, L1:{labels.count(1)})")
     tprint(f"  ✓ {len(set(baby_ids))} unique babies")
