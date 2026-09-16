@@ -7,8 +7,16 @@
 stream_output = True
 stream_error  = True
 
+# only fine_grained
+# shell =  mkdir -p timeseries_with_chronos/results && /opt/conda/envs/chronos/bin/python -u timeseries_with_chronos/experiment_files/main.py classify --head singular --mode fine_grained
 
-shell =  mkdir -p timeseries_with_chronos/results && /opt/conda/envs/chronos/bin/python -u timeseries_with_chronos/experiment_files/main.py classify --head concat
+# only seasonal
+shell =  mkdir -p timeseries_with_chronos/results && /opt/conda/envs/chronos/bin/python -u timeseries_with_chronos/experiment_files/main.py classify --head singular --mode seasonal
+
+# inner join
+# shell =  mkdir -p timeseries_with_chronos/results && /opt/conda/envs/chronos/bin/python -u timeseries_with_chronos/experiment_files/main.py classify --head concat
+
+
 container_image =  osdf:///chtc/staging/a/agoyal33/chronos3.sif 
 
 
@@ -16,7 +24,7 @@ should_transfer_files = YES
 transfer_input_files = /home/agoyal33/timeseries_with_chronos, osdf:///chtc/staging/a/agoyal33/vitals_old.tar
 
 
-# transfer_output_files = timeseries_with_chronos/results
+transfer_output_files = timeseries_with_chronos/results
 
 
 # Logs

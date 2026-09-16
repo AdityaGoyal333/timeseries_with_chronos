@@ -13,6 +13,6 @@ experiment_files/*focal
 /results*
 /docs
 /EDA/plots
-*.pkl
+/data
 *.parquet
 logs/

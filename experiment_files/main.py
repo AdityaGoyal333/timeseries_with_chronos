@@ -20,7 +20,7 @@ Outputs (via callees; paths from repo root via __file__, not cwd)
   data/embeddings_global[_fine_grained].pkl
   results/labels_{N}d[_fine_grained|_concat].pkl
   results/results_{N}d_{focal|ce}[_fine_grained|_concat].pkl
-  results/training_curves_{N}d_{focal|ce}[…]
+  results/training_curves_{N}d_{focal|ce}[_fine_grained|_concat]
 """
 
 import argparse

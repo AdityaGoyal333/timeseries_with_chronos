@@ -7,8 +7,12 @@
 stream_output = True
 stream_error  = True
 
+# seasonal
+#shell = bash timeseries_with_chronos/chtc_scripts/unzip_data.sh && /opt/conda/envs/chronos/bin/python -u timeseries_with_chronos/experiment_files/main.py train --mode seasonal && bash timeseries_with_chronos/chtc_scripts/clean_data.sh
 
+# fine grained
 shell = bash timeseries_with_chronos/chtc_scripts/unzip_data.sh && /opt/conda/envs/chronos/bin/python -u timeseries_with_chronos/experiment_files/main.py train --mode fine_grained && bash timeseries_with_chronos/chtc_scripts/clean_data.sh
+
 container_image =  osdf:///chtc/staging/a/agoyal33/chronos3.sif 
 
 should_transfer_files = YES
