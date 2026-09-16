@@ -5,18 +5,17 @@
 # if a listed transfer path is missing).
 
 stream_output = True
-
 stream_error  = True
 
-# shell = bash timeseries_with_chronos/chtc_scripts/unzip_data.sh && mkdir -p timeseries_with_chronos/results && /opt/conda/envs/chronos/bin/python -u timeseries_with_chronos/experiment_files/main.py classify --head concat && bash timeseries_with_chronos/chtc_scripts/clean_data.sh
 
-shell =  mkdir -p timeseries_with_chronos/results && /opt/conda/envs/chronos/bin/python -u timeseries_with_chronos/experiment_files/main.py classify --head concat
+shell = bash timeseries_with_chronos/chtc_scripts/unzip_data.sh && /opt/conda/envs/chronos/bin/python -u timeseries_with_chronos/experiment_files/main.py train --mode fine_grained && bash timeseries_with_chronos/chtc_scripts/clean_data.sh
 container_image =  osdf:///chtc/staging/a/agoyal33/chronos3.sif 
 
 should_transfer_files = YES
 transfer_input_files = /home/agoyal33/timeseries_with_chronos, osdf:///chtc/staging/a/agoyal33/vitals_old.tar
 
-transfer_output_files = timeseries_with_chronos/results,timeseries_with_chronos/data
+
+transfer_output_files = timeseries_with_chronos/data
 
 
 # Logs
