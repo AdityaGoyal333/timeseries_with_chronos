@@ -1,46 +1,45 @@
-# gpu_test.sub — CHTC submit file for the default GPU experiment.
-#
-# Classify artifacts go under timeseries_with_chronos/results/ (from __file__).
-# mkdir so this directory exists even if classify did not run (HTCondor holds
-# if a listed transfer path is missing).
+# CHTC GPU train. Unlabeled: one site tar per job (not vitals_multi.tar).
+# clean_data.sh removes data/download only; pickles under data/unlabeled/site_i stay.
 
 stream_output = True
 stream_error  = True
 
-# labeled seasonal
+# labeled seasonal (transfer vitals_old.tar, not a site tar)
 #shell = bash timeseries_with_chronos/chtc_scripts/unzip_data.sh && /opt/conda/envs/chronos/bin/python -u timeseries_with_chronos/experiment_files/main.py train --source labeled --mode seasonal && bash timeseries_with_chronos/chtc_scripts/clean_data.sh
 
-# labeled fine grained
+# labeled fine grained (transfer vitals_old.tar)
 #shell = bash timeseries_with_chronos/chtc_scripts/unzip_data.sh && /opt/conda/envs/chronos/bin/python -u timeseries_with_chronos/experiment_files/main.py train --source labeled --mode fine_grained && bash timeseries_with_chronos/chtc_scripts/clean_data.sh
 
-# unlabeled fine grained
-# Needs parquet vitals at data/download/vitals/ and outcomes.parquet at data/download/.
-# vitals_old.tar is .mat; unlabeled will not find parquet unless you transfer it.
-shell = bash timeseries_with_chronos/chtc_scripts/unzip_data.sh && /opt/conda/envs/chronos/bin/python -u timeseries_with_chronos/experiment_files/main.py train --source unlabeled --mode fine_grained && bash timeseries_with_chronos/chtc_scripts/clean_data.sh
+# unlabeled site_1 fine grained
+shell = bash timeseries_with_chronos/chtc_scripts/unzip_data.sh && /opt/conda/envs/chronos/bin/python -u timeseries_with_chronos/experiment_files/main.py train --source site_1 --mode fine_grained && bash timeseries_with_chronos/chtc_scripts/clean_data.sh
 
-container_image =  osdf:///chtc/staging/a/agoyal33/chronos3.sif 
+# unlabeled site_2
+#shell = bash timeseries_with_chronos/chtc_scripts/unzip_data.sh && /opt/conda/envs/chronos/bin/python -u timeseries_with_chronos/experiment_files/main.py train --source site_2 --mode fine_grained && bash timeseries_with_chronos/chtc_scripts/clean_data.sh
+
+# unlabeled site_3
+#shell = bash timeseries_with_chronos/chtc_scripts/unzip_data.sh && /opt/conda/envs/chronos/bin/python -u timeseries_with_chronos/experiment_files/main.py train --source site_3 --mode fine_grained && bash timeseries_with_chronos/chtc_scripts/clean_data.sh
+
+# unlabeled site_4
+#shell = bash timeseries_with_chronos/chtc_scripts/unzip_data.sh && /opt/conda/envs/chronos/bin/python -u timeseries_with_chronos/experiment_files/main.py train --source site_4 --mode fine_grained && bash timeseries_with_chronos/chtc_scripts/clean_data.sh
+
+container_image =  osdf:///chtc/staging/a/agoyal33/chronos3.sif
 
 should_transfer_files = YES
-transfer_input_files = /home/agoyal33/timeseries_with_chronos, osdf:///chtc/staging/a/agoyal33/vitals_old.tar
-
+# Switch vitals_site_N_unlabelled.tar to match the uncommented --source site_N line.
+# Labeled jobs: osdf:///chtc/staging/a/agoyal33/vitals_old.tar (no outcomes needed).
+transfer_input_files = /home/agoyal33/timeseries_with_chronos, osdf:///chtc/staging/a/agoyal33/vitals_site_1_unlabelled.tar, osdf:///chtc/staging/a/agoyal33/outcomes.parquet
 
 transfer_output_files = timeseries_with_chronos/data
 
-
-# Logs
 output = logs/gpu_$(Cluster)_$(Process).out
 error  = logs/gpu_$(Cluster)_$(Process).err
 log    = logs/gpu_$(Cluster)_$(Process).log
 
-# GPU
 request_gpus = 1
-
-# Other resources
 request_cpus   = 4
 request_memory = 20GB
 request_disk   = 100GB
 
-# CHTC GPU settings
 +WantGPULab = true
 
 queue 1

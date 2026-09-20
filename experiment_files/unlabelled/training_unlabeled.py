@@ -10,9 +10,9 @@ FG keys are 4-part (80h bounds + slice), matching labeled FG — not
 
 Outputs
 -------
-  data/unlabeled/embeddings_global.pkl
-  data/unlabeled/embeddings_global_fine_grained.pkl
-  data/unlabeled/windows_missing_embeddings[_fine_grained].pkl
+  data/unlabeled/site_i/embeddings_global.pkl
+  data/unlabeled/site_i/embeddings_global_fine_grained.pkl
+  data/unlabeled/site_i/windows_missing_embeddings[_fine_grained].pkl
 """
 
 import hashlib
@@ -33,12 +33,11 @@ from constants import (
     MISSING_WINDOWS_PATHS,
     NUM_FG_EMBEDDINGS,
     NUM_WINDOWS_FG,
-    UNLABELED_DIR,
-    UNLABELED_VITALS_DIR,
     WINDOW_SIZE_US,
+    unlabeled_pickle_dir,
+    unlabeled_vitals_dir,
 )
-from log_utils import tprint
-from training_data import (
+from labelled.training_data import (
     create_fg_key,
     create_window_key,
     create_windowed_features_from_raw,
@@ -46,20 +45,22 @@ from training_data import (
     load_embeddings_cache,
     save_embeddings_cache,
 )
+from log_utils import tprint
 
 
-def cache_paths(binning_mode):
-    """Return (embeddings_cache_path, missing_windows_path) under data/unlabeled/."""
+def cache_paths(binning_mode, site):
+    """Return (embeddings_cache_path, missing_windows_path) under data/unlabeled/site_i."""
+    pickle_dir = unlabeled_pickle_dir(site)
     return (
-        (UNLABELED_DIR / EMBEDDINGS_CACHE_PATHS[binning_mode]).resolve(),
-        (UNLABELED_DIR / MISSING_WINDOWS_PATHS[binning_mode]).resolve(),
+        (pickle_dir / EMBEDDINGS_CACHE_PATHS[binning_mode]).resolve(),
+        (pickle_dir / MISSING_WINDOWS_PATHS[binning_mode]).resolve(),
     )
 
 
-def resolve_parquet_path(mat_ref):
-    """Absolute parquet path under data/download/vitals from baby id."""
+def resolve_parquet_path(mat_ref, site):
+    """Absolute parquet path under data/download/site_i from baby id."""
     baby_id = Path(str(mat_ref)).name.replace('.parquet', '')
-    return UNLABELED_VITALS_DIR / f"{baby_id}.parquet"
+    return unlabeled_vitals_dir(site) / f"{baby_id}.parquet"
 
 
 def embed_slice(window_start):
@@ -148,7 +149,9 @@ def detect_missing_windows(windows_df, cache, binning_mode):
     return pd.DataFrame(records).drop_duplicates()
 
 
-def generate_missing_embeddings(missing_df, cache, pipeline, cache_path, binning_mode, save_every=500):
+def generate_missing_embeddings(
+    missing_df, cache, pipeline, cache_path, binning_mode, site, save_every=500
+):
     """Embed missing unlabeled keys; checkpoint every save_every successes."""
     total = len(missing_df)
     if total == 0:
@@ -187,7 +190,7 @@ def generate_missing_embeddings(missing_df, cache, pipeline, cache_path, binning
             load_start, context_size, window_size = embed_slice(row['window_start'])
         try:
             result = create_windowed_features(
-                str(resolve_parquet_path(row['mat_file'])),
+                str(resolve_parquet_path(row['mat_file'], site)),
                 load_start,
                 context_size,
                 window_size,
@@ -225,13 +228,15 @@ def generate_missing_embeddings(missing_df, cache, pipeline, cache_path, binning
     return cache
 
 
-def ensure_embeddings_for_windows(windows_df, binning_mode, save_every=500):
+def ensure_embeddings_for_windows(windows_df, binning_mode, site, save_every=500):
     """Unlabeled Step 3: detect missing keys, embed from parquet, checkpoint."""
-    UNLABELED_DIR.mkdir(parents=True, exist_ok=True)
-    embeddings_path, missing_path = cache_paths(binning_mode)
+    pickle_dir = unlabeled_pickle_dir(site)
+    pickle_dir.mkdir(parents=True, exist_ok=True)
+    embeddings_path, missing_path = cache_paths(binning_mode, site)
 
     tprint("\n" + "=" * 80)
     tprint(" " * 6 + "STEP 3 (UNLABELED): EMBEDDINGS (DETECT MISSING → GENERATE)")
+    tprint(f"  Site: {site}")
     tprint(f"  Binning: {binning_mode}")
     tprint(f"  Cache: {embeddings_path}")
     tprint("=" * 80 + "\n")
@@ -269,7 +274,7 @@ def ensure_embeddings_for_windows(windows_df, binning_mode, save_every=500):
         dtype=torch.bfloat16,
     )
     cache = generate_missing_embeddings(
-        missing_df, cache, pipeline, embeddings_path, binning_mode, save_every=save_every
+        missing_df, cache, pipeline, embeddings_path, binning_mode, site, save_every=save_every
     )
 
     still_missing = len(detect_missing_windows(windows_df, cache, binning_mode))

@@ -85,16 +85,27 @@ HEAD_SINGULAR = 'singular'
 HEAD_CONCAT = 'concat'
 HEAD_CHOICES = (HEAD_SINGULAR, HEAD_CONCAT)
 
-# train --source: labeled .mat pipeline vs unlabeled parquet pipeline.
+# train --source: labeled .mat, or one unlabeled site (each site is its own dataset).
 SOURCE_LABELED = 'labeled'
-SOURCE_UNLABELED = 'unlabeled'
-SOURCE_CHOICES = (SOURCE_LABELED, SOURCE_UNLABELED)
+SITE_CHOICES = ('site_1', 'site_2', 'site_3', 'site_4')
+SOURCE_CHOICES = (SOURCE_LABELED,) + SITE_CHOICES
 
-# Pickles/caches only. Raw vitals stay under data/download/{Vitals,vitals}.
+# Pickles/caches: data/labeled and data/unlabeled/site_i.
+# Raw vitals: data/download/Vitals (.mat) and data/download/site_i (parquet).
 LABELED_DIR = (REPO_ROOT / 'data' / 'labeled').resolve()
 UNLABELED_DIR = (REPO_ROOT / 'data' / 'unlabeled').resolve()
-UNLABELED_VITALS_DIR = (REPO_ROOT / 'data' / 'download' / 'vitals').resolve()
-OUTCOMES_PATH = (REPO_ROOT / 'data' / 'download' / 'outcomes.parquet').resolve()
+DOWNLOAD_DIR = (REPO_ROOT / 'data' / 'download').resolve()
+OUTCOMES_PATH = (DOWNLOAD_DIR / 'outcomes.parquet').resolve()
+
+
+def unlabeled_pickle_dir(site):
+    """data/unlabeled/site_i — one unlabeled pipeline's pickles and caches."""
+    return (UNLABELED_DIR / site).resolve()
+
+
+def unlabeled_vitals_dir(site):
+    """data/download/site_i — parquet for that site (tar already has site_i/)."""
+    return (DOWNLOAD_DIR / site).resolve()
 
 # Unlabeled parquet age_us is microseconds. Same geometry as labeled, × 1e6.
 # Do not convert age_us to seconds.

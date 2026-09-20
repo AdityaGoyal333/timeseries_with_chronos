@@ -21,7 +21,7 @@ container_image =  osdf:///chtc/staging/a/agoyal33/chronos3.sif
 
 
 should_transfer_files = YES
-transfer_input_files = /home/agoyal33/timeseries_with_chronos
+transfer_input_files = /home/agoyal33/timeseries_with_chronos, osdf:///chtc/staging/a/agoyal33/outcomes.parquet
 
 
 transfer_output_files = timeseries_with_chronos/results

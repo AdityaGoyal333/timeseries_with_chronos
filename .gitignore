@@ -3,7 +3,7 @@ old_files/
 .cursor/
 venv/
 .DS_Store
-experiment_files/__pycache__
+__pycache__/
 experiment_files/*.pkl
 experiment_files/*focal
 /temporary
