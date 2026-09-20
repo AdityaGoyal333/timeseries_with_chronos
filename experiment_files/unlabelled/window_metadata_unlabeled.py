@@ -5,8 +5,8 @@ Pipeline role
 Same overlap/caps as labeled window_metadata, but t0 is min(age_us) rather
 than birth, and clocks stay in microseconds.
 
-NICU vs NON_NICU is decided by the caller (outcomes died_yn), not by a
-death timestamp in the parquet.
+birth_time / death_time are first and last age_us (absolute), not calendar
+birth or in-hospital death. NICU vs NON_NICU still comes from died_yn.
 
 Outputs
 -------
@@ -65,7 +65,8 @@ def generate_window_metadata_for_baby(parquet_path, overlap_percentage, max_wind
                 'window_start': window_start,
                 'window_end': window_end,
                 'baby_type': baby_type,
-                'death_time': np.nan,
+                # Absolute last sample (µs), not labeled "seconds since birth".
+                'death_time': last_ts,
                 'birth_time': t0,
             })
 

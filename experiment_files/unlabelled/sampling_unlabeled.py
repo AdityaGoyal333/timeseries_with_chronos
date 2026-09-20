@@ -128,7 +128,7 @@ def assign_labels_for_all_thresholds(sampled_windows_df):
 
     NON_NICU (died_yn != Yes) → label 0.
     NICU (died_yn == Yes) → label NaN; classify fills this later.
-    death_time stays NaN on every unlabeled row.
+    death_time is last age_us from metadata (absolute), not in-hospital death.
     """
     tprint("\n" + "=" * 80)
     tprint(" " * 12 + "UNLABELED LABELS (0 / NaN, NO DEATH TIME)")
