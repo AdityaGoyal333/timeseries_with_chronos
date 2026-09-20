@@ -1,14 +1,14 @@
-"""Step 2 (unlabeled): downsample candidate windows. No death-proximity labels.
+"""Step 2 (unlabeled): downsample windows and write the classify roster.
 
 Pipeline role
 -------------
-Same per-baby counts and NICU late bias as labeled sampling. Unlabeled
-parquet has no death timestamp, so this step does not write
-sampled_windows_all_thresholds.pkl.
+Same per-baby counts and NICU late bias as labeled sampling. Death time is
+left NaN; classify fills 0/1 for NICU rows later.
 
-Outputs
+Outputs (written by main under data/unlabeled/site_i/)
 -------
-data/unlabeled/windows_to_embed.pkl  —  written by main
+windows_to_embed.pkl                  — unique windows (Step 3; no label)
+sampled_windows_all_thresholds.pkl    — those windows × thresholds + label
 """
 
 import numpy as np
@@ -18,6 +18,7 @@ from constants import (
     NICU_LATE_WINDOW_BIAS,
     NUM_SAMPLE_WINDOWS_NICU,
     NUM_SAMPLE_WINDOWS_NON_NICU,
+    THRESHOLDS_DAYS,
 )
 from log_utils import tprint
 
@@ -120,3 +121,47 @@ def sample_windows_once(metadata_df):
     tprint(f"{'=' * 80}\n")
 
     return sampled_windows_df
+
+
+def assign_labels_for_all_thresholds(sampled_windows_df):
+    """Copy sampled windows once per threshold. Do not compute death proximity.
+
+    NON_NICU (died_yn != Yes) → label 0.
+    NICU (died_yn == Yes) → label NaN; classify fills this later.
+    death_time stays NaN on every unlabeled row.
+    """
+    tprint("\n" + "=" * 80)
+    tprint(" " * 12 + "UNLABELED LABELS (0 / NaN, NO DEATH TIME)")
+    tprint("=" * 80 + "\n")
+
+    all_labeled_data = []
+
+    for threshold_days in THRESHOLDS_DAYS:
+        tprint(f"Assigning placeholder labels for {threshold_days}-day threshold...")
+        df = sampled_windows_df.copy()
+        df['threshold_days'] = threshold_days
+        df['label'] = np.nan
+        df.loc[df['baby_type'] == 'NON_NICU', 'label'] = 0
+
+        n_total = len(df)
+        n_label_0 = (df['label'] == 0).sum()
+        n_nan = df['label'].isna().sum()
+        tprint(f"  ✓ Total: {n_total}, Label 0: {n_label_0}, Label NaN: {n_nan}\n")
+        all_labeled_data.append(df)
+
+    all_labeled_df = pd.concat(all_labeled_data, ignore_index=True)
+    unique_windows_df = sampled_windows_df.copy()
+
+    tprint(f"{'=' * 80}")
+    tprint(f"✓ Threshold-table rows: {len(all_labeled_df)}")
+    tprint(f"✓ Unique windows: {len(unique_windows_df)}")
+    tprint(f"{'=' * 80}\n")
+
+    return all_labeled_df, unique_windows_df
+
+
+def sample_and_label_all_thresholds(metadata_df):
+    """Downsample, then attach 0/NaN labels for all thresholds."""
+    sampled_windows_df = sample_windows_once(metadata_df)
+    return assign_labels_for_all_thresholds(sampled_windows_df)
+

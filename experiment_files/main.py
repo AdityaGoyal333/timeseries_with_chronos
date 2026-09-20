@@ -9,8 +9,8 @@ Commands
 --------
   train --source labeled|site_1|site_2|site_3|site_4 --mode seasonal|fine_grained
       Metadata + sampling if missing, then embeddings for that mode only.
-      site_* is unlabeled (one dataset per site). No death-proximity labels,
-      no classify.
+      site_* is unlabeled (one dataset per site). Death-proximity labels are
+      0 (survivors) or NaN (died); classify fills NaN later.
   classify --head singular --mode …
       Join Step 2 labels to one labeled cache, train MLP.
   classify --head concat
@@ -20,7 +20,7 @@ Outputs (via callees; paths from repo root via __file__, not cwd)
 --------------------------------------------------------
   data/labeled/window_metadata.pkl, windows_to_embed.pkl, sampled_windows_all_thresholds.pkl
   data/labeled/embeddings_global[_fine_grained].pkl
-  data/unlabeled/site_i/window_metadata.pkl, windows_to_embed.pkl
+  data/unlabeled/site_i/window_metadata.pkl, windows_to_embed.pkl, sampled_windows_all_thresholds.pkl
   data/unlabeled/site_i/embeddings_global[_fine_grained].pkl
   results/labels_{N}d[_fine_grained|_concat].pkl
   results/results_{N}d_{focal|ce}[_fine_grained|_concat].pkl
@@ -42,7 +42,7 @@ from labelled.training_data import (
     prepare_training_data_for_threshold,
 )
 from labelled.window_metadata import generate_all_window_metadata
-from unlabelled.sampling_unlabeled import sample_windows_once as sample_windows_unlabeled
+from unlabelled.sampling_unlabeled import sample_and_label_all_thresholds as sample_and_label_unlabeled
 from unlabelled.training_unlabeled import ensure_embeddings_for_windows as ensure_embeddings_unlabeled
 from unlabelled.window_metadata_unlabeled import generate_all_window_metadata as generate_all_window_metadata_unlabeled
 from train_classifier import train_and_save_results
@@ -188,14 +188,15 @@ def _ensure_steps_1_and_2():
 
 
 def _ensure_unlabeled_steps_1_and_2(site):
-    """Load or create unlabeled 80h metadata and downsample-only samples for one site.
+    """Load or create unlabeled 80h metadata, unique windows, and the 0/NaN roster.
 
-    Skip is keyed on data/unlabeled/site_i/windows_to_embed.pkl. No labels pickle.
+    Skip is keyed on data/unlabeled/site_i/windows_to_embed.pkl.
     """
     pickle_dir = unlabeled_pickle_dir(site)
     pickle_dir.mkdir(parents=True, exist_ok=True)
     metadata_path = pickle_dir / 'window_metadata.pkl'
     windows_path = pickle_dir / 'windows_to_embed.pkl'
+    thresholds_path = pickle_dir / 'sampled_windows_all_thresholds.pkl'
 
     if os.path.exists(metadata_path):
         metadata_df = pd.read_pickle(metadata_path)
@@ -210,9 +211,11 @@ def _ensure_unlabeled_steps_1_and_2(site):
         unique_windows_df = pd.read_pickle(windows_path)
         tprint(f"✓ Loaded unlabeled sampled windows ({site}): {len(unique_windows_df)}\n")
     else:
-        unique_windows_df = sample_windows_unlabeled(metadata_df)
+        all_labeled_df, unique_windows_df = sample_and_label_unlabeled(metadata_df)
         unique_windows_df.to_pickle(windows_path)
         tprint(f"✓ Saved: {windows_path}")
+        all_labeled_df.to_pickle(thresholds_path)
+        tprint(f"✓ Saved: {thresholds_path}")
 
     return unique_windows_df
 
