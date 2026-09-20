@@ -19,9 +19,9 @@ Binning
 
 Outputs
 -------
-  data/embeddings_global.pkl
-  data/embeddings_global_fine_grained.pkl
-  data/windows_missing_embeddings[_fine_grained].pkl
+  data/labeled/embeddings_global.pkl
+  data/labeled/embeddings_global_fine_grained.pkl
+  data/labeled/windows_missing_embeddings[_fine_grained].pkl
   results/labels_{N}d[_fine_grained|_concat].pkl
 """
 
@@ -47,6 +47,7 @@ from constants import (
     FG_WINDOW_SIZE_SECONDS,
     FINE_GRAINED_OUTPUT_SUFFIX,
     HEAD_CONCAT,
+    LABELED_DIR,
     MISSING_WINDOWS_PATHS,
     NUM_FG_EMBEDDINGS,
     NUM_WINDOWS_FG,
@@ -90,10 +91,10 @@ def output_suffix(binning_mode=None, head=None):
 
 
 def cache_paths(binning_mode):
-    """Return (embeddings_cache_path, missing_windows_path) for this binning mode."""
+    """Return (embeddings_cache_path, missing_windows_path) under data/labeled/."""
     return (
-        (DATA_DIR / EMBEDDINGS_CACHE_PATHS[binning_mode]).resolve(),
-        (DATA_DIR / MISSING_WINDOWS_PATHS[binning_mode]).resolve(),
+        (LABELED_DIR / EMBEDDINGS_CACHE_PATHS[binning_mode]).resolve(),
+        (LABELED_DIR / MISSING_WINDOWS_PATHS[binning_mode]).resolve(),
     )
 
 
@@ -421,6 +422,7 @@ def generate_missing_embeddings(missing_df, cache, pipeline, cache_path, binning
 
 def ensure_embeddings_for_windows(windows_df, binning_mode, save_every=500):
     """Step 3 entry point: detect missing keys, embed, checkpoint incrementally."""
+    LABELED_DIR.mkdir(parents=True, exist_ok=True)
     embeddings_path, missing_path = cache_paths(binning_mode)
 
     tprint("\n" + "=" * 80)

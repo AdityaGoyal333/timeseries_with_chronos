@@ -7,17 +7,20 @@ Does not implement those steps; it chooses which ones to run.
 
 Commands
 --------
-  train --mode seasonal|fine_grained
+  train --source labeled|unlabeled --mode seasonal|fine_grained
       Metadata + sampling if missing, then embeddings for that mode only.
+      Unlabeled skips death-proximity labels and does not run classify.
   classify --head singular --mode …
-      Join Step 2 labels to one cache, train MLP, write labels/results/curves.
+      Join Step 2 labels to one labeled cache, train MLP.
   classify --head concat
-      Inner-join both caches (seasonal ∥ FG). --mode is unused.
+      Inner-join both labeled caches (seasonal ∥ FG). --mode is unused.
 
 Outputs (via callees; paths from repo root via __file__, not cwd)
 --------------------------------------------------------
-  data/window_metadata.pkl, windows_to_embed.pkl, sampled_windows_all_thresholds.pkl
-  data/embeddings_global[_fine_grained].pkl
+  data/labeled/window_metadata.pkl, windows_to_embed.pkl, sampled_windows_all_thresholds.pkl
+  data/labeled/embeddings_global[_fine_grained].pkl
+  data/unlabeled/window_metadata.pkl, windows_to_embed.pkl
+  data/unlabeled/embeddings_global[_fine_grained].pkl
   results/labels_{N}d[_fine_grained|_concat].pkl
   results/results_{N}d_{focal|ce}[_fine_grained|_concat].pkl
   results/training_curves_{N}d_{focal|ce}[_fine_grained|_concat]
@@ -31,6 +34,7 @@ from pathlib import Path
 import pandas as pd
 
 from sampling import sample_and_label_all_thresholds
+from sampling_unlabeled import sample_windows_once as sample_windows_unlabeled
 from train_classifier import train_and_save_results
 from training_data import (
     ensure_embeddings_for_windows,
@@ -38,13 +42,21 @@ from training_data import (
     prepare_concat_training_data_for_threshold,
     prepare_training_data_for_threshold,
 )
+from training_unlabeled import ensure_embeddings_for_windows as ensure_embeddings_unlabeled
 from window_metadata import generate_all_window_metadata
+from window_metadata_unlabeled import generate_all_window_metadata as generate_all_window_metadata_unlabeled
 from constants import (
     BINNING_CHOICES,
     HEAD_CHOICES,
     HEAD_CONCAT,
     HEAD_SINGULAR,
+    LABELED_DIR,
+    OUTCOMES_PATH,
+    SOURCE_CHOICES,
+    SOURCE_UNLABELED,
     THRESHOLDS_DAYS,
+    UNLABELED_DIR,
+    UNLABELED_VITALS_DIR,
 )
 from log_utils import tprint
 
@@ -58,9 +70,12 @@ VITALS_DIR = (DATA_DIR / "download" / "Vitals").resolve()
 VITALS_FILES = list(VITALS_DIR.glob("*.mat"))
 VITALS_FILES = [str(f) for f in VITALS_FILES]
 
-WINDOW_METADATA_PATH = (DATA_DIR / 'window_metadata.pkl').resolve()
-WINDOWS_TO_EMBED_PATH = (DATA_DIR / 'windows_to_embed.pkl').resolve()
-SAMPLED_WINDOWS_ALL_THRESHOLDS_PATH = (DATA_DIR / 'sampled_windows_all_thresholds.pkl').resolve()
+WINDOW_METADATA_PATH = (LABELED_DIR / 'window_metadata.pkl').resolve()
+WINDOWS_TO_EMBED_PATH = (LABELED_DIR / 'windows_to_embed.pkl').resolve()
+SAMPLED_WINDOWS_ALL_THRESHOLDS_PATH = (LABELED_DIR / 'sampled_windows_all_thresholds.pkl').resolve()
+
+UNLABELED_WINDOW_METADATA_PATH = (UNLABELED_DIR / 'window_metadata.pkl').resolve()
+UNLABELED_WINDOWS_TO_EMBED_PATH = (UNLABELED_DIR / 'windows_to_embed.pkl').resolve()
 
 
 def _discover_mat_files():
@@ -98,6 +113,48 @@ def _discover_mat_files():
     return nicu_files, non_nicu_files
 
 
+def _discover_parquet_files():
+    """Partition local parquet paths using outcomes.parquet died_yn.
+
+    Join is int(stem) == subject_number_deid (EDA). NICU = died_yn == 'Yes'.
+    """
+    if not OUTCOMES_PATH.exists():
+        raise FileNotFoundError(f"Missing {OUTCOMES_PATH}")
+
+    outcomes = pd.read_parquet(OUTCOMES_PATH, columns=['subject_number_deid', 'died_yn'])
+    died_map = dict(
+        zip(outcomes['subject_number_deid'].astype(int), outcomes['died_yn'])
+    )
+
+    all_parquet = sorted(UNLABELED_VITALS_DIR.glob('*.parquet'))
+    nicu_files = []
+    non_nicu_files = []
+    unmatched = 0
+    bad_stem = 0
+
+    for path in all_parquet:
+        try:
+            sid = int(path.stem)
+        except ValueError:
+            bad_stem += 1
+            continue
+        if sid not in died_map:
+            unmatched += 1
+            continue
+        if died_map[sid] == 'Yes':
+            nicu_files.append(str(path))
+        else:
+            non_nicu_files.append(str(path))
+
+    tprint(f"✓ {len(died_map)} rows in outcomes.parquet")
+    tprint(f"✓ {len(all_parquet)} parquet files in {UNLABELED_VITALS_DIR}")
+    tprint(f"✓ {len(nicu_files)} NICU (died_yn == Yes)")
+    tprint(f"✓ {len(non_nicu_files)} Non-NICU (died_yn != Yes)")
+    tprint(f"⚠ {unmatched} parquet stems not in outcomes")
+    tprint(f"⚠ {bad_stem} parquet files with non-integer stems\n")
+    return nicu_files, non_nicu_files
+
+
 def _ensure_steps_1_and_2():
     """Load or create shared 80h metadata and labeled samples.
 
@@ -105,6 +162,8 @@ def _ensure_steps_1_and_2():
     labels. Skip is keyed on windows_to_embed.pkl (existing contract), not
     on sampled_windows_all_thresholds.pkl.
     """
+    LABELED_DIR.mkdir(parents=True, exist_ok=True)
+
     # Step 1: candidate 80h windows per baby.
     if os.path.exists(WINDOW_METADATA_PATH):
         metadata_df = pd.read_pickle(WINDOW_METADATA_PATH)
@@ -129,19 +188,49 @@ def _ensure_steps_1_and_2():
     return unique_windows_df
 
 
-def run_train(binning_mode):
-    """Steps 1–3 only: shared windows/labels, then embeddings for one mode.
+def _ensure_unlabeled_steps_1_and_2():
+    """Load or create unlabeled 80h metadata and downsample-only samples.
+
+    Skip is keyed on data/unlabeled/windows_to_embed.pkl. No labels pickle.
+    """
+    UNLABELED_DIR.mkdir(parents=True, exist_ok=True)
+
+    if os.path.exists(UNLABELED_WINDOW_METADATA_PATH):
+        metadata_df = pd.read_pickle(UNLABELED_WINDOW_METADATA_PATH)
+        tprint(f"✓ Loaded unlabeled metadata: {len(metadata_df)} windows\n")
+    else:
+        nicu_files, non_nicu_files = _discover_parquet_files()
+        metadata_df = generate_all_window_metadata_unlabeled(nicu_files, non_nicu_files)
+        metadata_df.to_pickle(UNLABELED_WINDOW_METADATA_PATH)
+        tprint(f"✓ Saved: {UNLABELED_WINDOW_METADATA_PATH}\n")
+
+    if os.path.exists(UNLABELED_WINDOWS_TO_EMBED_PATH):
+        unique_windows_df = pd.read_pickle(UNLABELED_WINDOWS_TO_EMBED_PATH)
+        tprint(f"✓ Loaded unlabeled sampled windows: {len(unique_windows_df)}\n")
+    else:
+        unique_windows_df = sample_windows_unlabeled(metadata_df)
+        unique_windows_df.to_pickle(UNLABELED_WINDOWS_TO_EMBED_PATH)
+        tprint(f"✓ Saved: {UNLABELED_WINDOWS_TO_EMBED_PATH}")
+
+    return unique_windows_df
+
+
+def run_train(source, binning_mode):
+    """Steps 1–3: shared windows, then embeddings for one mode.
 
     Does not join labels or train the MLP. Writes that mode's cache and
-    missing-windows pickle.
+    missing-windows pickle under data/labeled or data/unlabeled.
     """
     tprint("\n" + "=" * 100)
-    tprint(f"  TRAIN  mode={binning_mode}")
+    tprint(f"  TRAIN  source={source}  mode={binning_mode}")
     tprint("=" * 100 + "\n")
 
-    unique_windows_df = _ensure_steps_1_and_2()
-    # Step 3 fills only keys absent from this mode's cache.
-    ensure_embeddings_for_windows(unique_windows_df, binning_mode)
+    if source == SOURCE_UNLABELED:
+        unique_windows_df = _ensure_unlabeled_steps_1_and_2()
+        ensure_embeddings_unlabeled(unique_windows_df, binning_mode)
+    else:
+        unique_windows_df = _ensure_steps_1_and_2()
+        ensure_embeddings_for_windows(unique_windows_df, binning_mode)
 
     tprint("\n" + "=" * 100)
     tprint(" " * 30 + "✓ TRAIN COMPLETE")
@@ -151,12 +240,13 @@ def run_train(binning_mode):
 def run_classify(head, binning_mode, use_focal_loss, gamma):
     """Steps 4–5: join Step 2 labels to cache(s), then k-fold MLP.
 
-    Does not call Chronos. Labels always come from sampled_windows_all_thresholds.
-    Concat ignores binning_mode; singular requires it (enforced in __main__).
+    Labeled only. Does not call Chronos. Labels always come from
+    sampled_windows_all_thresholds. Concat ignores binning_mode; singular
+    requires it (enforced in __main__).
     """
     if not os.path.exists(SAMPLED_WINDOWS_ALL_THRESHOLDS_PATH):
         raise FileNotFoundError(
-            f"Missing {SAMPLED_WINDOWS_ALL_THRESHOLDS_PATH}. Run train first."
+            f"Missing {SAMPLED_WINDOWS_ALL_THRESHOLDS_PATH}. Run train --source labeled first."
         )
 
     loss_name = f"Focal Loss (γ={gamma})" if use_focal_loss else "Cross-Entropy"
@@ -202,6 +292,7 @@ if __name__ == "__main__":
     sub = parser.add_subparsers(dest='command', required=True)
 
     p_train = sub.add_parser('train', help='Steps 1–3: metadata, labels, embeddings')
+    p_train.add_argument('--source', required=True, choices=SOURCE_CHOICES)
     p_train.add_argument('--mode', required=True, choices=BINNING_CHOICES)
 
     p_cls = sub.add_parser('classify', help='Steps 4–5: join labels to cache(s), MLP')
@@ -213,7 +304,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.command == 'train':
-        run_train(args.mode)
+        run_train(args.source, args.mode)
     else:
         # Concat does not use --mode; singular must pick which cache to join.
         if args.head == HEAD_SINGULAR and args.mode is None:

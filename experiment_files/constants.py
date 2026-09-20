@@ -2,9 +2,9 @@
 
 Pipeline role
 -------------
-Imported by window_metadata, sampling, training_data, train_classifier, and
-main. Change geometry, thresholds, cache filenames, and CLI tokens here so
-those modules stay in sync.
+Imported by window_metadata, sampling, training_data, train_classifier,
+unlabeled step modules, and main. Change geometry, thresholds, cache
+filenames, and CLI tokens here so those modules stay in sync.
 
 Not a runnable step. Values below are the contract for pickle names and
 window keys; changing them invalidates existing caches unless you regenerate.
@@ -84,3 +84,23 @@ CONCAT_OUTPUT_SUFFIX = '_concat'
 HEAD_SINGULAR = 'singular'
 HEAD_CONCAT = 'concat'
 HEAD_CHOICES = (HEAD_SINGULAR, HEAD_CONCAT)
+
+# train --source: labeled .mat pipeline vs unlabeled parquet pipeline.
+SOURCE_LABELED = 'labeled'
+SOURCE_UNLABELED = 'unlabeled'
+SOURCE_CHOICES = (SOURCE_LABELED, SOURCE_UNLABELED)
+
+# Pickles/caches only. Raw vitals stay under data/download/{Vitals,vitals}.
+LABELED_DIR = (REPO_ROOT / 'data' / 'labeled').resolve()
+UNLABELED_DIR = (REPO_ROOT / 'data' / 'unlabeled').resolve()
+UNLABELED_VITALS_DIR = (REPO_ROOT / 'data' / 'download' / 'vitals').resolve()
+OUTCOMES_PATH = (REPO_ROOT / 'data' / 'download' / 'outcomes.parquet').resolve()
+
+# Unlabeled parquet age_us is microseconds. Same geometry as labeled, × 1e6.
+# Do not convert age_us to seconds.
+US_PER_SECOND = 1_000_000
+CONTEXT_SIZE_US = CONTEXT_SIZE_SECONDS * US_PER_SECOND
+WINDOW_SIZE_US = WINDOW_SIZE_SECONDS * US_PER_SECOND
+FG_CONTEXT_SIZE_US = FG_CONTEXT_SIZE_SECONDS * US_PER_SECOND
+FG_WINDOW_SIZE_US = FG_WINDOW_SIZE_SECONDS * US_PER_SECOND
+FG_LOOKBACK_US = FG_LOOKBACK_SECONDS * US_PER_SECOND

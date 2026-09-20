@@ -7,11 +7,16 @@
 stream_output = True
 stream_error  = True
 
-# seasonal
-#shell = bash timeseries_with_chronos/chtc_scripts/unzip_data.sh && /opt/conda/envs/chronos/bin/python -u timeseries_with_chronos/experiment_files/main.py train --mode seasonal && bash timeseries_with_chronos/chtc_scripts/clean_data.sh
+# labeled seasonal
+#shell = bash timeseries_with_chronos/chtc_scripts/unzip_data.sh && /opt/conda/envs/chronos/bin/python -u timeseries_with_chronos/experiment_files/main.py train --source labeled --mode seasonal && bash timeseries_with_chronos/chtc_scripts/clean_data.sh
 
-# fine grained
-shell = bash timeseries_with_chronos/chtc_scripts/unzip_data.sh && /opt/conda/envs/chronos/bin/python -u timeseries_with_chronos/experiment_files/main.py train --mode fine_grained && bash timeseries_with_chronos/chtc_scripts/clean_data.sh
+# labeled fine grained
+#shell = bash timeseries_with_chronos/chtc_scripts/unzip_data.sh && /opt/conda/envs/chronos/bin/python -u timeseries_with_chronos/experiment_files/main.py train --source labeled --mode fine_grained && bash timeseries_with_chronos/chtc_scripts/clean_data.sh
+
+# unlabeled fine grained
+# Needs parquet vitals at data/download/vitals/ and outcomes.parquet at data/download/.
+# vitals_old.tar is .mat; unlabeled will not find parquet unless you transfer it.
+shell = bash timeseries_with_chronos/chtc_scripts/unzip_data.sh && /opt/conda/envs/chronos/bin/python -u timeseries_with_chronos/experiment_files/main.py train --source unlabeled --mode fine_grained && bash timeseries_with_chronos/chtc_scripts/clean_data.sh
 
 container_image =  osdf:///chtc/staging/a/agoyal33/chronos3.sif 
 
