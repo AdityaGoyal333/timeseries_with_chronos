@@ -90,12 +90,43 @@ def output_suffix(binning_mode=None, head=None):
     return ''
 
 
-def cache_paths(binning_mode):
-    """Return (embeddings_cache_path, missing_windows_path) under data/labeled/."""
+def cache_paths(binning_mode, pickle_dir=None):
+    """Return (embeddings_cache_path, missing_windows_path) under pickle_dir.
+
+    Default pickle_dir is data/labeled/. Pass data/unlabeled/site_i for a site.
+    """
+    root = LABELED_DIR if pickle_dir is None else pickle_dir
     return (
-        (LABELED_DIR / EMBEDDINGS_CACHE_PATHS[binning_mode]).resolve(),
-        (LABELED_DIR / MISSING_WINDOWS_PATHS[binning_mode]).resolve(),
+        (root / EMBEDDINGS_CACHE_PATHS[binning_mode]).resolve(),
+        (root / MISSING_WINDOWS_PATHS[binning_mode]).resolve(),
     )
+
+
+def _join_label_and_times(row):
+    """Keep unlabeled died-file NaN; attach window_end / death_time for gapping."""
+    raw = row['label']
+    label = np.nan if pd.isna(raw) else int(raw)
+    window_end = row['window_end']
+    death_time = row['death_time'] if 'death_time' in row.index and pd.notna(row['death_time']) else np.nan
+    return label, window_end, death_time
+
+
+def _dump_labels_pickle(path, embedding_keys, labels, baby_ids, write_labels):
+    """Write labels_{N}d pickle unless this join is unlabeled train (would clobber labeled)."""
+    if not write_labels:
+        return
+    with open(path, 'wb') as f:
+        pl.dump({'embedding_keys': embedding_keys, 'labels': labels, 'baby_ids': baby_ids}, f)
+    tprint(f"  ✓ Saved: {path} (~{(len(embedding_keys) * 100) / 1024:.2f} KB)")
+
+
+def _label_count_msg(labels):
+    arr = np.asarray(labels, dtype=float)
+    n0 = int(np.sum(arr == 0))
+    n1 = int(np.sum(arr == 1))
+    nnan = int(np.sum(np.isnan(arr)))
+    extra = f", NaN:{nnan}" if nnan else ""
+    return f"L0:{n0}, L1:{n1}{extra}"
 
 
 def embed_slice(binning_mode, window_start, window_end):
@@ -476,11 +507,17 @@ def ensure_embeddings_for_windows(windows_df, binning_mode, save_every=500):
 
 
 def prepare_training_data_for_threshold(
-    threshold_days, samples_windows_path, binning_mode, embeddings_cache=None
+    threshold_days,
+    samples_windows_path,
+    binning_mode,
+    embeddings_cache=None,
+    pickle_dir=None,
+    write_labels=True,
 ):
     """Step 4 singular: join Step 2 labels to whatever keys exist in this cache.
 
     Seasonal: one row per 80h key. FG: one row per stored slice for that 80h window.
+    pickle_dir selects labeled vs unlabeled/site_i caches. Died-file NaNs are kept.
     """
     suffix = output_suffix(binning_mode)
     labels_path = labels_output_path(threshold_days, suffix)
@@ -488,7 +525,7 @@ def prepare_training_data_for_threshold(
     tprint(f"\nPreparing {threshold_days}-day threshold (binning={binning_mode})...")
 
     if embeddings_cache is None:
-        embeddings_path, _ = cache_paths(binning_mode)
+        embeddings_path, _ = cache_paths(binning_mode, pickle_dir)
         embeddings_cache = load_embeddings_cache(embeddings_path)
 
     sampled_all = pd.read_pickle(samples_windows_path)
@@ -497,6 +534,8 @@ def prepare_training_data_for_threshold(
     embedding_keys = []
     labels = []
     baby_ids = []
+    window_ends = []
+    death_times = []
     fg_index = (
         index_fg_keys_by_80h(embeddings_cache)
         if binning_mode == BINNING_FINE_GRAINED
@@ -512,33 +551,36 @@ def prepare_training_data_for_threshold(
             slice_keys = fg_index.get(window_key, [])
         else:
             slice_keys = [window_key] if window_key in embeddings_cache else []
+        label, window_end, death_time = _join_label_and_times(row)
         for key in slice_keys:
             embedding_keys.append(key)
-            labels.append(int(row['label']))
+            labels.append(label)
             baby_ids.append(baby_id)
+            window_ends.append(window_end)
+            death_times.append(death_time)
 
-    tprint(f"  ✓ {len(embedding_keys)} samples (L0:{labels.count(0)}, L1:{labels.count(1)})")
+    tprint(f"  ✓ {len(embedding_keys)} samples ({_label_count_msg(labels)})")
     tprint(f"  ✓ {len(set(baby_ids))} unique babies")
 
-    with open(labels_path, 'wb') as f:
-        pl.dump({'embedding_keys': embedding_keys, 'labels': labels, 'baby_ids': baby_ids}, f)
-
-    tprint(f"  ✓ Saved: {labels_path} (~{(len(embedding_keys) * 100) / 1024:.2f} KB)")
+    _dump_labels_pickle(labels_path, embedding_keys, labels, baby_ids, write_labels)
 
     embeddings = [embeddings_cache[key] for key in embedding_keys]
-    return embeddings, labels, baby_ids
+    return embeddings, labels, baby_ids, window_ends, death_times
 
 
-def prepare_concat_training_data_for_threshold(threshold_days, samples_windows_path):
+def prepare_concat_training_data_for_threshold(
+    threshold_days, samples_windows_path, pickle_dir=None, write_labels=True
+):
     """Step 4 concat: labels table + cache lookup. No slice geometry here.
 
     One row per FG cache key for that 80h window, if the seasonal 80h vector exists.
+    pickle_dir selects labeled vs unlabeled/site_i caches. Died-file NaNs are kept.
     """
     suffix = output_suffix(head=HEAD_CONCAT)
     labels_path = labels_output_path(threshold_days, suffix)
 
-    seasonal_cache = load_embeddings_cache(cache_paths(BINNING_SEASONAL)[0])
-    fg_cache = load_embeddings_cache(cache_paths(BINNING_FINE_GRAINED)[0])
+    seasonal_cache = load_embeddings_cache(cache_paths(BINNING_SEASONAL, pickle_dir)[0])
+    fg_cache = load_embeddings_cache(cache_paths(BINNING_FINE_GRAINED, pickle_dir)[0])
     fg_index = index_fg_keys_by_80h(fg_cache)
 
     tprint(f"\nPreparing {threshold_days}-day threshold (head=concat)...")
@@ -551,6 +593,8 @@ def prepare_concat_training_data_for_threshold(threshold_days, samples_windows_p
     embedding_keys = []
     labels = []
     baby_ids = []
+    window_ends = []
+    death_times = []
     embeddings = []
     n_no_seasonal = 0
 
@@ -562,23 +606,23 @@ def prepare_concat_training_data_for_threshold(threshold_days, samples_windows_p
             n_no_seasonal += 1
             continue
         baby_id = baby_id_from_mat_ref(row['mat_file'])
+        label, window_end, death_time = _join_label_and_times(row)
         for fg_key in fg_index.get(seasonal_key, []):
             embedding_keys.append(fg_key)
-            labels.append(int(row['label']))
+            labels.append(label)
             baby_ids.append(baby_id)
+            window_ends.append(window_end)
+            death_times.append(death_time)
             embeddings.append(
                 np.concatenate([seasonal_cache[seasonal_key], fg_cache[fg_key]])
             )
 
     tprint(f"  ✓ 80h rows with no seasonal vector: {n_no_seasonal}")
-    tprint(f"  ✓ {len(embedding_keys)} concat samples (L0:{labels.count(0)}, L1:{labels.count(1)})")
+    tprint(f"  ✓ {len(embedding_keys)} concat samples ({_label_count_msg(labels)})")
     tprint(f"  ✓ {len(set(baby_ids))} unique babies")
 
-    with open(labels_path, 'wb') as f:
-        pl.dump({'embedding_keys': embedding_keys, 'labels': labels, 'baby_ids': baby_ids}, f)
-
-    tprint(f"  ✓ Saved: {labels_path} (~{(len(embedding_keys) * 100) / 1024:.2f} KB)")
-    return embeddings, labels, baby_ids
+    _dump_labels_pickle(labels_path, embedding_keys, labels, baby_ids, write_labels)
+    return embeddings, labels, baby_ids, window_ends, death_times
 
 
 def load_training_data_for_threshold(threshold_days, binning_mode):

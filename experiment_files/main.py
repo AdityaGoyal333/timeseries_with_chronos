@@ -12,9 +12,9 @@ Commands
       site_* is unlabeled (one dataset per site). Death-proximity labels are
       0 (survivors) or NaN (died); classify fills NaN later.
   classify --head singular --mode …
-      Join Step 2 labels to one labeled cache, train MLP.
-  classify --head concat
-      Inner-join both labeled caches (seasonal ∥ FG). --mode is unused.
+      Join Step 2 labels to cache(s), train MLP. Default train+eval = labeled.
+      --sites site_i … adds unlabeled to train. --no-labeled requires --sites
+      (eval stays labeled). Concat ignores --mode.
 
 Outputs (via callees; paths from repo root via __file__, not cwd)
 --------------------------------------------------------
@@ -23,8 +23,8 @@ Outputs (via callees; paths from repo root via __file__, not cwd)
   data/unlabeled/site_i/window_metadata.pkl, windows_to_embed.pkl, sampled_windows_all_thresholds.pkl
   data/unlabeled/site_i/embeddings_global[_fine_grained].pkl
   results/labels_{N}d[_fine_grained|_concat].pkl
-  results/results_{N}d_{focal|ce}[_fine_grained|_concat].pkl
-  results/training_curves_{N}d_{focal|ce}[_fine_grained|_concat]
+  results/results_{N}d_{focal|ce}[_fine_grained|_concat][_lab|_unlab_site_i].pkl
+  results/training_curves_{N}d_{focal|ce}[_fine_grained|_concat][_lab|_unlab_site_i]
 """
 
 import argparse
@@ -56,6 +56,7 @@ from constants import (
     SITE_CHOICES,
     SOURCE_CHOICES,
     THRESHOLDS_DAYS,
+    classify_mix_suffix,
     unlabeled_pickle_dir,
     unlabeled_vitals_dir,
 )
@@ -242,49 +243,82 @@ def run_train(source, binning_mode):
     tprint("=" * 100 + "\n")
 
 
-def run_classify(head, binning_mode, use_focal_loss, gamma):
-    """Steps 4–5: join Step 2 labels to cache(s), then k-fold MLP.
+def _prepare_threshold(head, binning_mode, threshold_days, roster_path, pickle_dir=None, write_labels=True):
+    """Join one source's roster to that source's cache(s)."""
+    if head == HEAD_CONCAT:
+        return prepare_concat_training_data_for_threshold(
+            threshold_days, roster_path, pickle_dir=pickle_dir, write_labels=write_labels
+        )
+    return prepare_training_data_for_threshold(
+        threshold_days,
+        roster_path,
+        binning_mode,
+        pickle_dir=pickle_dir,
+        write_labels=write_labels,
+    )
 
-    Labeled only. Does not call Chronos. Labels always come from
-    sampled_windows_all_thresholds. Concat ignores binning_mode; singular
-    requires it (enforced in __main__).
+
+def run_classify(head, binning_mode, use_focal_loss, gamma, include_labeled=True, sites=None):
+    """Steps 4–5: join Step 2 labels to cache(s), then MLP.
+
+    Eval is always labeled. Train is labeled and/or unlabeled sites.
+    Does not call Chronos. Concat ignores binning_mode; singular requires it.
     """
+    sites = list(sites or [])
     if not os.path.exists(SAMPLED_WINDOWS_ALL_THRESHOLDS_PATH):
         raise FileNotFoundError(
             f"Missing {SAMPLED_WINDOWS_ALL_THRESHOLDS_PATH}. Run train --source labeled first."
         )
+    for site in sites:
+        roster = unlabeled_pickle_dir(site) / 'sampled_windows_all_thresholds.pkl'
+        if not roster.exists():
+            raise FileNotFoundError(f"Missing {roster}. Run train --source {site} first.")
 
     loss_name = f"Focal Loss (γ={gamma})" if use_focal_loss else "Cross-Entropy"
-    suffix = output_suffix(binning_mode, head)
+    suffix = output_suffix(binning_mode, head) + classify_mix_suffix(include_labeled, sites)
 
     tprint("\n" + "=" * 100)
-    tprint(f"  CLASSIFY  head={head}  mode={binning_mode or 'n/a'}  {loss_name}")
+    tprint(
+        f"  CLASSIFY  head={head}  mode={binning_mode or 'n/a'}  {loss_name}  "
+        f"labeled_train={include_labeled}  sites={sites or 'none'}"
+    )
     tprint("=" * 100 + "\n")
 
     for threshold_days in THRESHOLDS_DAYS:
-        # Step 4: same labeled rows; feature vector is one cache or seasonal∥FG.
-        if head == HEAD_CONCAT:
-            embeddings, labels, baby_ids = prepare_concat_training_data_for_threshold(
-                threshold_days,
-                SAMPLED_WINDOWS_ALL_THRESHOLDS_PATH,
+        lab_emb, lab_y, lab_baby, _, _ = _prepare_threshold(
+            head, binning_mode, threshold_days, SAMPLED_WINDOWS_ALL_THRESHOLDS_PATH,
+            pickle_dir=None, write_labels=True,
+        )
+
+        un_emb, un_y, un_we, un_dt = [], [], [], []
+        for site in sites:
+            roster = unlabeled_pickle_dir(site) / 'sampled_windows_all_thresholds.pkl'
+            e, y, _b, we, dt = _prepare_threshold(
+                head, binning_mode, threshold_days, roster,
+                pickle_dir=unlabeled_pickle_dir(site), write_labels=False,
             )
-        else:
-            embeddings, labels, baby_ids = prepare_training_data_for_threshold(
-                threshold_days,
-                SAMPLED_WINDOWS_ALL_THRESHOLDS_PATH,
-                binning_mode,
-            )
-        # Step 5: write labels_* already done in prepare_*; this trains and dumps results.
+            un_emb.extend(e)
+            un_y.extend(y)
+            un_we.extend(we)
+            un_dt.extend(dt)
+
         train_and_save_results(
             threshold_days,
-            embeddings,
-            labels,
-            baby_ids=baby_ids,
+            lab_emb,
+            lab_y,
+            baby_ids=lab_baby,
             use_focal_loss=use_focal_loss,
             gamma=gamma,
             loss_name=loss_name,
             binning_mode=binning_mode or 'seasonal',
             output_suffix=suffix,
+            unlabeled={
+                'embeddings': un_emb,
+                'labels': un_y,
+                'window_end': un_we,
+                'death_time': un_dt,
+            } if un_emb else None,
+            include_labeled=include_labeled,
         )
 
     tprint("\n" + "=" * 100)
@@ -305,6 +339,14 @@ if __name__ == "__main__":
     p_cls.add_argument('--mode', choices=BINNING_CHOICES, default=None)
     p_cls.add_argument('--gamma', type=float, default=2.0)
     p_cls.add_argument('--ce', action='store_true', help='Use cross-entropy instead of focal loss')
+    p_cls.add_argument(
+        '--sites', nargs='*', default=[], choices=SITE_CHOICES,
+        help='Unlabeled sites to add to training (eval stays labeled)',
+    )
+    p_cls.add_argument(
+        '--no-labeled', action='store_true',
+        help='Omit labeled data from training (requires --sites; eval stays labeled)',
+    )
 
     args = parser.parse_args()
 
@@ -314,9 +356,15 @@ if __name__ == "__main__":
         # Concat does not use --mode; singular must pick which cache to join.
         if args.head == HEAD_SINGULAR and args.mode is None:
             parser.error('classify --head singular requires --mode')
+        include_labeled = not args.no_labeled
+        sites = args.sites or []
+        if not include_labeled and not sites:
+            parser.error('classify --no-labeled requires --sites')
         run_classify(
             head=args.head,
             binning_mode=args.mode,
             use_focal_loss=not args.ce,
             gamma=args.gamma,
+            include_labeled=include_labeled,
+            sites=sites,
         )

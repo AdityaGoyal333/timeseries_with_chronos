@@ -107,6 +107,27 @@ def unlabeled_vitals_dir(site):
     """data/download/site_i — parquet for that site (tar already has site_i/)."""
     return (DOWNLOAD_DIR / site).resolve()
 
+
+# Train-batch positive fraction when classify train is unlabeled sites only.
+# Labeled-in-train still uses 2× full labeled prevalence (see train_classifier).
+UNLABELED_BATCH_POSITIVE_RATIO = 0.10
+
+
+def classify_mix_suffix(include_labeled, sites):
+    """Extra results suffix so mixed/unlabeled runs do not overwrite labeled-only files.
+
+    Labeled-only → '' (existing names). Else _lab and/or _unlab_site_i.
+    """
+    if include_labeled and not sites:
+        return ''
+    parts = []
+    if include_labeled:
+        parts.append('lab')
+    if sites:
+        parts.append('unlab')
+        parts.extend(sites)
+    return '_' + '_'.join(parts) if parts else ''
+
 # Unlabeled parquet age_us is microseconds. Same geometry as labeled, × 1e6.
 # Do not convert age_us to seconds.
 US_PER_SECOND = 1_000_000

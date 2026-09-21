@@ -2,12 +2,14 @@
 
 Pipeline role
 -------------
-Takes (embeddings, labels, baby_ids) from Step 4 and trains a small MLP
-with StratifiedGroupKFold by baby. Writes per-fold and pooled curves plus
+Takes labeled (and optional unlabeled) embeddings from Step 4. Eval is
+always labeled. Unlabeled died-file NaNs are gapped per epoch / batch fill.
+
+Writes per-fold and pooled curves plus
 results_{N}d_{focal|ce}[suffix].pkl.
 
 Called from main.classify via train_and_save_results. Artifact suffix
-comes from classify (seasonal='', FG=_fine_grained, concat=_concat).
+comes from classify (seasonal='', FG=_fine_grained, concat=_concat, mix).
 
 Outputs
 -------
@@ -34,7 +36,7 @@ from sklearn.metrics import (
     roc_auc_score,
     roc_curve,
 )
-from sklearn.model_selection import StratifiedGroupKFold, StratifiedKFold
+from sklearn.model_selection import StratifiedGroupKFold
 from torch.utils.data import DataLoader, Dataset
 from torchvision.ops import sigmoid_focal_loss
 
@@ -43,7 +45,14 @@ from torch.utils.data import Sampler
 
 from log_utils import tprint
 
-from constants import BINNING_FINE_GRAINED, FINE_GRAINED_OUTPUT_SUFFIX, RESULTS_DIR
+from constants import (
+    BINNING_FINE_GRAINED,
+    FINE_GRAINED_OUTPUT_SUFFIX,
+    RESULTS_DIR,
+    UNLABELED_BATCH_POSITIVE_RATIO,
+    US_PER_SECOND,
+)
+from unlabelled.gap_labels import apply_gap_labels
 
 
 class EmbeddingDataset(Dataset):
@@ -177,6 +186,110 @@ class UniformClassBatchSampler(Sampler):
     def __len__(self):
         """Number of batches DataLoader should draw this epoch."""
         return self.num_batches
+
+
+# Cap re-gaps on a short fill so a missing class cannot hang an epoch.
+_MAX_FILL_REGAPS = 32
+
+
+class GapEpochLoader:
+    """Train loader: first-pass gap for P-chunks, then a new gap before each fill."""
+
+    def __init__(
+        self,
+        embedding_matrix,
+        realized_labels,
+        unknown_mask,
+        window_end,
+        death_time,
+        threshold_us,
+        batch_size,
+        positive_ratio,
+    ):
+        self.emb = np.asarray(embedding_matrix, dtype=np.float32)
+        self.realized = np.asarray(realized_labels, dtype=np.float64)
+        self.unknown_mask = np.asarray(unknown_mask, dtype=bool)
+        self.window_end = np.asarray(window_end, dtype=np.float64)
+        self.death_time = np.asarray(death_time, dtype=np.float64)
+        self.threshold_us = threshold_us
+        self.batch_size = batch_size
+        self.n = len(self.realized)
+        self.num_batches = math.ceil(self.n / batch_size) if self.n else 0
+        self.T = min(int(round(positive_ratio * batch_size)), batch_size)
+        self.rng = np.random.default_rng()
+
+    def __len__(self):
+        return self.num_batches
+
+    def _impute(self):
+        return apply_gap_labels(
+            self.realized, self.unknown_mask, self.window_end,
+            self.death_time, self.threshold_us, self.rng,
+        )
+
+    def first_pass_positive_rate(self):
+        """MLP bias: this train set after one gap pass (unknown rows included)."""
+        y = self._impute()
+        return float(y.mean()) if len(y) else 0.0
+
+    def _extra_ones(self, need, in_batch, fill_y, realized_ones):
+        if need <= 0:
+            return []
+        imputed_ones = np.where(self.unknown_mask & (fill_y == 1))[0]
+        pool = [int(i) for i in np.concatenate([realized_ones, imputed_ones]) if int(i) not in in_batch]
+        if not pool:
+            return []
+        extra = np.random.choice(pool, size=need, replace=need > len(pool))
+        return [int(i) for i in extra]
+
+    def _fill_zeros(self, batch, fill_y):
+        in_batch = {i for i, _ in batch}
+        zeros = np.where(fill_y == 0)[0]
+        np.random.shuffle(zeros)
+        for i in zeros:
+            if len(batch) >= self.batch_size:
+                break
+            i = int(i)
+            if i not in in_batch:
+                batch.append((i, 0))
+                in_batch.add(i)
+
+    def __iter__(self):
+        if self.n == 0 or self.num_batches == 0:
+            return
+        y0 = self._impute()
+        positives = np.where(y0 == 1)[0]
+        np.random.shuffle(positives)
+        chunks = list(np.array_split(positives, self.num_batches))
+        np.random.shuffle(chunks)
+        realized_ones = np.where((~self.unknown_mask) & (self.realized == 1))[0]
+
+        for chunk in chunks:
+            batch = [(int(i), 1) for i in np.asarray(chunk)]
+            if len(batch) > self.T:
+                np.random.shuffle(batch)
+                batch = batch[:self.T]
+
+            for attempt in range(_MAX_FILL_REGAPS + 1):
+                fill_y = self._impute()
+                in_batch = {i for i, _ in batch}
+                n_pos = sum(y for _, y in batch)
+                if n_pos < self.T:
+                    extras = self._extra_ones(self.T - n_pos, in_batch, fill_y, realized_ones)
+                    batch.extend((i, 1) for i in extras)
+                if len(batch) < self.batch_size:
+                    self._fill_zeros(batch, fill_y)
+                n_pos = sum(y for _, y in batch)
+                if n_pos >= self.T and len(batch) >= self.batch_size:
+                    break
+                if attempt == _MAX_FILL_REGAPS:
+                    break
+
+            if not batch:
+                continue
+            np.random.shuffle(batch)
+            idx, y = zip(*batch)
+            yield torch.FloatTensor(self.emb[list(idx)]), torch.FloatTensor(y)
 
 
 
@@ -640,6 +753,41 @@ def _save_fold_probabilities(y_true_folds, y_score_folds, fold_pr_curves, fold_r
     return fold_probabilities, path
 
 
+def _stack_emb(embeddings):
+    """N×D float32 matrix; concat heads are already flattened vectors."""
+    return np.stack([np.asarray(e, dtype=np.float32).flatten() for e in embeddings])
+
+
+def _pack_unlabeled(unlabeled, dim):
+    """Stack unlabeled train arrays, or None if that pool is empty."""
+    if not unlabeled or not unlabeled.get('embeddings'):
+        return None
+    mat = _stack_emb(unlabeled['embeddings'])
+    if mat.shape[1] != dim:
+        raise ValueError(f"Labeled embedding dim {dim} != unlabeled dim {mat.shape[1]}")
+    y = np.asarray(unlabeled['labels'], dtype=float)
+    return {
+        'mat': mat,
+        'y': y,
+        'we': np.asarray(unlabeled['window_end'], dtype=float),
+        'dt': np.asarray(unlabeled['death_time'], dtype=float),
+        'unknown': np.isnan(y),
+    }
+
+
+def _append_unlabeled(lab_mat_train, lab_y_train, un):
+    """Train fold = labeled train rows + all unlabeled (gap arrays aligned)."""
+    n_lab = len(lab_y_train)
+    train_mat = np.concatenate([lab_mat_train, un['mat']], axis=0)
+    gap_spec = (
+        np.concatenate([lab_y_train.astype(float), un['y']]),
+        np.concatenate([np.zeros(n_lab, dtype=bool), un['unknown']]),
+        np.concatenate([np.full(n_lab, np.nan), un['we']]),
+        np.concatenate([np.full(n_lab, np.nan), un['dt']]),
+    )
+    return train_mat, gap_spec
+
+
 def k_fold_cv(
     embeddings,
     labels,
@@ -654,72 +802,110 @@ def k_fold_cv(
     gamma=2.0,
     output_dir=None,
     batch_positive_ratio=None,
+    unlabeled=None,
+    include_labeled=True,
+    threshold_us=None,
 ):
-    """Grouped k-fold MLP on stacked embedding vectors.
-
-    Splits by baby_id so the same infant cannot appear in train and val.
-    Concat heads just have a wider dim; fold logic is unchanged.
-    """
-    if len(embeddings) == 0:
+    """Grouped k-fold MLP. Split is labeled babies only; unlabeled never in val."""
+    has_unlab = unlabeled is not None and len(unlabeled.get('embeddings') or []) > 0
+    if include_labeled and len(embeddings) == 0:
         tprint('No embeddings to train on!')
+        return None, None, None, None, None, None
+    if not include_labeled and not has_unlab:
+        tprint('No embeddings to train on!')
+        return None, None, None, None, None, None
+    if len(embeddings) == 0:
+        tprint('No labeled embeddings to evaluate on!')
         return None, None, None, None, None, None
 
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
 
-    labels = np.asarray(labels, dtype=int)
-    # Flatten so seasonal and seasonal∥FG both look like (N, D).
-    embedding_matrix = np.stack([np.asarray(e, dtype=np.float32).flatten() for e in embeddings])
-    dim = embedding_matrix.shape[1]
+    lab_y = np.asarray(labels, dtype=int)
+    lab_mat = _stack_emb(embeddings)
+    lab_baby = np.asarray(baby_ids)
+    dim = lab_mat.shape[1]
+    un = _pack_unlabeled(unlabeled, dim) if has_unlab else None
+    has_unlab = un is not None
 
     if use_focal_loss and alpha is None:
-        alpha = _focal_alpha(labels)
+        alpha = _focal_alpha(lab_y)
 
     loss_name = f'Focal (alpha={alpha:.3f}, gamma={gamma})' if use_focal_loss else 'BCE'
-    pos_rate = labels.mean()
-    n_babies = len(set(baby_ids)) if baby_ids is not None else None
-    split_name = 'StratifiedGroupKFold (by baby_id)' if baby_ids is not None else 'StratifiedKFold (by window)'
+    pos_rate = lab_y.mean()
+    n_babies = len(set(lab_baby.tolist()))
+    if include_labeled:
+        split_name = (
+            'StratifiedGroupKFold (labeled baby_id; unlabeled all-in-train)'
+            if has_unlab else 'StratifiedGroupKFold (by baby_id)'
+        )
+    else:
+        split_name = 'Unlabeled train / full labeled eval'
+        k = 1
     tprint(f"\n{'=' * 80}")
     tprint(f'K-fold CV | {loss_name} | {split_name}')
-    tprint(f'Samples: {len(labels)} | Pos rate: {pos_rate:.3f} ({labels.sum()} positives)')
-    if n_babies is not None:
-        tprint(f'Babies: {n_babies} | Folds: {k}')
-    else:
-        tprint(f'Folds: {k}')
+    tprint(f'Labeled samples: {len(lab_y)} | Pos rate: {pos_rate:.3f} ({lab_y.sum()} positives)')
+    if has_unlab:
+        tprint(f'Unlabeled train rows: {len(un["y"])} | unknown (NaN): {int(un["unknown"].sum())}')
+    tprint(f'Babies: {n_babies} | Folds: {k}')
     tprint(f'Embedding dim: {dim}')
     if output_dir:
         tprint(f'Curves: {output_dir}')
     tprint('=' * 80)
 
-
-    baby_ids = np.asarray(baby_ids)
-    splitter = StratifiedGroupKFold(n_splits=k, shuffle=True, random_state=42)
-    split_iter = splitter.split(embedding_matrix, labels, groups=baby_ids)
+    if include_labeled:
+        splitter = StratifiedGroupKFold(n_splits=k, shuffle=True, random_state=42)
+        split_iter = list(splitter.split(lab_mat, lab_y, groups=lab_baby))
+    else:
+        split_iter = [(None, None)]
 
     fold_metrics, fold_curve_data = [], []
     fold_y_true, fold_y_probs = [], []
 
     # One model per fold; val metrics use the last epoch's weights.
     for fold, (train_idx, val_idx) in enumerate(split_iter):
-        if baby_ids is not None:
-            train_babies = set(baby_ids[train_idx])
-            val_babies = set(baby_ids[val_idx])
+        if include_labeled:
+            train_babies = set(lab_baby[train_idx])
+            val_babies = set(lab_baby[val_idx])
             overlap = train_babies & val_babies
             assert not overlap, f"Fold {fold + 1}: {len(overlap)} babies in both train and val"
+            val_mat, val_y = lab_mat[val_idx], lab_y[val_idx]
+            if has_unlab:
+                train_mat, gap_spec = _append_unlabeled(lab_mat[train_idx], lab_y[train_idx], un)
+                train_y = None
+            else:
+                train_mat = lab_mat[train_idx]
+                train_y = lab_y[train_idx]
+                gap_spec = None
+        else:
+            train_mat = un['mat']
+            train_y = None
+            gap_spec = (un['y'], un['unknown'], un['we'], un['dt'])
+            val_mat, val_y = lab_mat, lab_y
 
         tprint(f'Fold {fold + 1}/{k}...', end=' ')
 
-        train_dataset = EmbeddingDataset( embedding_matrix[train_idx], labels[train_idx])
-        batch_sampler = UniformClassBatchSampler(
-            labels=labels[train_idx],
-            batch_size=batch_size,
-            positive_ratio=batch_positive_ratio,
+        if gap_spec is None:
+            train_loader = DataLoader(
+                EmbeddingDataset(train_mat, train_y),
+                batch_sampler=UniformClassBatchSampler(
+                    labels=train_y,
+                    batch_size=batch_size,
+                    positive_ratio=batch_positive_ratio,
+                ),
+            )
+            train_pos_rate = train_y.mean()
+        else:
+            realized, unknown, we, dt = gap_spec
+            train_loader = GapEpochLoader(
+                train_mat, realized, unknown, we, dt,
+                threshold_us, batch_size, batch_positive_ratio,
+            )
+            train_pos_rate = train_loader.first_pass_positive_rate()
+
+        val_loader = DataLoader(
+            EmbeddingDataset(val_mat, val_y), batch_size=batch_size
         )
-
-        train_loader = DataLoader(train_dataset, batch_sampler=batch_sampler)
-        val_loader = DataLoader( EmbeddingDataset(embedding_matrix[val_idx], labels[val_idx]), batch_size=batch_size)
-
-        train_pos_rate = labels[train_idx].mean()
         model = Classifier(dim, positive_ratio=train_pos_rate).to(device)
         optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
@@ -825,31 +1011,36 @@ def train_and_save_results(
     batch_positive_ratio=None,
     binning_mode='seasonal',
     output_suffix='',
+    unlabeled=None,
+    include_labeled=True,
 ):
     """Train one threshold and write results/curves using the classify suffix.
 
     If output_suffix is set (preferred), it names artifacts. Else fall back
     to fine-grained-from-binning_mode so older call sites stay valid.
+    unlabeled is {embeddings, labels, window_end, death_time} or None.
     """
     tprint(f"\n{'=' * 80}\nThreshold: {threshold_days} days ({loss_name})\n{'=' * 80}")
 
     labels_arr = np.asarray(labels, dtype=int)
-    dataset_pos_rate = float(labels_arr.mean())
-    # Cap at 1.0 so a high-prevalence threshold cannot request >100% positives.
+    dataset_pos_rate = float(labels_arr.mean()) if len(labels_arr) else float('nan')
+    # Labeled in this run: 2× full labeled table (same R every fold). Unlabeled-only: config.
     if batch_positive_ratio is None:
-        batch_positive_ratio = min(2.0 * dataset_pos_rate, 1.0)
-    tprint(
-        f"Train batch positive ratio: {batch_positive_ratio:.4f} "
-        f"(2 × dataset rate {dataset_pos_rate:.4f})"
+        batch_positive_ratio = (
+            min(2.0 * dataset_pos_rate, 1.0) if include_labeled else UNLABELED_BATCH_POSITIVE_RATIO
+        )
+    r_note = (
+        f"2 × labeled dataset rate {dataset_pos_rate:.4f}"
+        if include_labeled else "UNLABELED_BATCH_POSITIVE_RATIO"
     )
+    tprint(f"Train batch positive ratio: {batch_positive_ratio:.4f} ({r_note})")
 
     loss_suffix = 'focal' if use_focal_loss else 'ce'
-    # Explicit suffix from main (incl. _concat) overrides mode-only naming.
+    # Explicit suffix from main (incl. _concat / mix) overrides mode-only naming.
     if output_suffix:
         bin_suffix = output_suffix
     else:
         bin_suffix = FINE_GRAINED_OUTPUT_SUFFIX if binning_mode == BINNING_FINE_GRAINED else ''
-    # Repo results/ from __file__, not cwd (same rule as data/).
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     output_dir = str(RESULTS_DIR / f'training_curves_{threshold_days}d_{loss_suffix}{bin_suffix}')
 
@@ -860,7 +1051,7 @@ def train_and_save_results(
         embeddings,
         labels,
         baby_ids,
-        k=k,
+        k=k if include_labeled else 1,
         epochs=epochs,
         batch_size=batch_size,
         lr=lr,
@@ -870,6 +1061,9 @@ def train_and_save_results(
         gamma=gamma,
         output_dir=output_dir,
         batch_positive_ratio=batch_positive_ratio,
+        unlabeled=unlabeled,
+        include_labeled=include_labeled,
+        threshold_us=threshold_days * 86400 * US_PER_SECOND,
     )
 
     filename = str(RESULTS_DIR / f'results_{threshold_days}d_{loss_suffix}{bin_suffix}.pkl')
