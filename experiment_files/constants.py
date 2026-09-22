@@ -3,7 +3,7 @@
 Pipeline role
 -------------
 Imported by window_metadata, sampling, training_data, train_classifier,
-unlabeled step modules, and main. Change geometry, thresholds, cache
+unlabelled step modules, and main. Change geometry, thresholds, cache
 filenames, and CLI tokens here so those modules stay in sync.
 
 Not a runnable step. Values below are the contract for pickle names and
@@ -39,15 +39,15 @@ OVERLAP_PERCENTAGE_NON_NICU = 0.0
 OVERLAP_PERCENTAGE_NICU = 0.90
 
 # Max candidate windows stored per baby in metadata (uniformly subsampled if exceeded)
-MAX_METADATA_WINDOWS_NON_NICU = 15
-MAX_METADATA_WINDOWS_NICU = 200
+MAX_METADATA_WINDOWS_NON_NICU = 50
+MAX_METADATA_WINDOWS_NICU = 500
 
 # --- Step 2: sampling (sampling.py) ---
 # How many windows to keep per baby after downsampling
-NUM_SAMPLE_WINDOWS_NON_NICU = 5
-NUM_SAMPLE_WINDOWS_NICU = 100
+NUM_SAMPLE_WINDOWS_NON_NICU = 15
+NUM_SAMPLE_WINDOWS_NICU = 200
 # Fraction of NICU sample slots allocated to the late (pre-death) half of timeline
-NICU_LATE_WINDOW_BIAS = 0.92
+NICU_LATE_WINDOW_BIAS = 0.95
 
 # --- Step 3: binning modes (how one 80h sample is sliced before Chronos) ---
 BINNING_SEASONAL = 'seasonal'
@@ -85,21 +85,23 @@ HEAD_SINGULAR = 'singular'
 HEAD_CONCAT = 'concat'
 HEAD_CHOICES = (HEAD_SINGULAR, HEAD_CONCAT)
 
-# train --source: labeled .mat, or one unlabeled site (each site is its own dataset).
-SOURCE_LABELED = 'labeled'
+# train --source: labelled .mat, or one unlabelled site (each site is its own dataset).
+SOURCE_LABELED = 'labelled'
 SITE_CHOICES = ('site_1', 'site_2', 'site_3', 'site_4')
 SOURCE_CHOICES = (SOURCE_LABELED,) + SITE_CHOICES
 
-# Pickles/caches: data/labeled and data/unlabeled/site_i.
+# Pickles/caches: data/labelled and data/unlabelled/site_i.
 # Raw vitals: data/download/Vitals (.mat) and data/download/site_i (parquet).
-LABELED_DIR = (REPO_ROOT / 'data' / 'labeled').resolve()
-UNLABELED_DIR = (REPO_ROOT / 'data' / 'unlabeled').resolve()
+LABELED_DIR = (REPO_ROOT / 'data' / 'labelled').resolve()
+UNLABELED_DIR = (REPO_ROOT / 'data' / 'unlabelled').resolve()
 DOWNLOAD_DIR = (REPO_ROOT / 'data' / 'download').resolve()
 OUTCOMES_PATH = (DOWNLOAD_DIR / 'outcomes.parquet').resolve()
+# Empirical last-timestamp-to-death gaps (seconds) for unlabelled classify sampling.
+DEATH_GAP_PATH = (DOWNLOAD_DIR / 'death_gap_results_updated.parquet').resolve()
 
 
 def unlabeled_pickle_dir(site):
-    """data/unlabeled/site_i — one unlabeled pipeline's pickles and caches."""
+    """data/unlabelled/site_i — one unlabelled pipeline's pickles and caches."""
     return (UNLABELED_DIR / site).resolve()
 
 
@@ -108,13 +110,13 @@ def unlabeled_vitals_dir(site):
     return (DOWNLOAD_DIR / site).resolve()
 
 
-# Train-batch positive fraction when classify train is unlabeled sites only.
-# Labeled-in-train still uses 2× full labeled prevalence (see train_classifier).
+# Train-batch positive fraction when classify train is unlabelled sites only.
+# Labeled-in-train still uses 2× full labelled prevalence (see train_classifier).
 UNLABELED_BATCH_POSITIVE_RATIO = 0.10
 
 
 def classify_mix_suffix(include_labeled, sites):
-    """Extra results suffix so mixed/unlabeled runs do not overwrite labeled-only files.
+    """Extra results suffix so mixed/unlabelled runs do not overwrite labelled-only files.
 
     Labeled-only → '' (existing names). Else _lab and/or _unlab_site_i.
     """
@@ -128,7 +130,7 @@ def classify_mix_suffix(include_labeled, sites):
         parts.extend(sites)
     return '_' + '_'.join(parts) if parts else ''
 
-# Unlabeled parquet age_us is microseconds. Same geometry as labeled, × 1e6.
+# Unlabeled parquet age_us is microseconds. Same geometry as labelled, × 1e6.
 # Do not convert age_us to seconds.
 US_PER_SECOND = 1_000_000
 CONTEXT_SIZE_US = CONTEXT_SIZE_SECONDS * US_PER_SECOND

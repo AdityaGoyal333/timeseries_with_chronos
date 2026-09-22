@@ -7,21 +7,37 @@
 stream_output = True
 stream_error  = True
 
-# only fine_grained
-# shell =  mkdir -p timeseries_with_chronos/results && /opt/conda/envs/chronos/bin/python -u timeseries_with_chronos/experiment_files/main.py classify --head singular --mode fine_grained
 
-# only seasonal
-shell =  mkdir -p timeseries_with_chronos/results && /opt/conda/envs/chronos/bin/python -u timeseries_with_chronos/experiment_files/main.py classify --head singular --mode seasonal
+# Default (no --sites): labeled train + labeled eval. Needs labeled caches.
+# --sites adds unlabeled site caches to train; eval stays labeled.
+# --no-labeled: unlabeled train only (requires --sites); eval stays labeled.
 
-# inner join
-# shell =  mkdir -p timeseries_with_chronos/results && /opt/conda/envs/chronos/bin/python -u timeseries_with_chronos/experiment_files/main.py classify --head concat
+# labeled-only seasonal / fine_grained / concat
+# shell =  bash timeseries_with_chronos/chtc_scripts/unzip_data.sh && mkdir -p timeseries_with_chronos/results && /opt/conda/envs/chronos/bin/python -u timeseries_with_chronos/experiment_files/main.py classify --head singular --mode seasonal
+# shell =  bash timeseries_with_chronos/chtc_scripts/unzip_data.sh && mkdir -p timeseries_with_chronos/results && /opt/conda/envs/chronos/bin/python -u timeseries_with_chronos/experiment_files/main.py classify --head singular --mode fine_grained
+# shell =  bash timeseries_with_chronos/chtc_scripts/unzip_data.sh && mkdir -p timeseries_with_chronos/results && /opt/conda/envs/chronos/bin/python -u timeseries_with_chronos/experiment_files/main.py classify --head concat
 
 
-container_image =  osdf:///chtc/staging/a/agoyal33/chronos3.sif 
+# labeled + several unlabeled sites
+#shell =  bash timeseries_with_chronos/chtc_scripts/unzip_data.sh && mkdir -p timeseries_with_chronos/results && /opt/conda/envs/chronos/bin/python -u timeseries_with_chronos/experiment_files/main.py classify --head singular --mode seasonal --sites site_1 site_2 site_3
+#shell =  bash timeseries_with_chronos/chtc_scripts/unzip_data.sh && mkdir -p timeseries_with_chronos/results && /opt/conda/envs/chronos/bin/python -u timeseries_with_chronos/experiment_files/main.py classify --head singular --mode seasonal --sites site_1 site_2 site_4
+#shell =  bash timeseries_with_chronos/chtc_scripts/unzip_data.sh && mkdir -p timeseries_with_chronos/results && /opt/conda/envs/chronos/bin/python -u timeseries_with_chronos/experiment_files/main.py classify --head singular --mode seasonal --sites site_2 site_3 site_4
+#shell =  bash timeseries_with_chronos/chtc_scripts/unzip_data.sh && mkdir -p timeseries_with_chronos/results && /opt/conda/envs/chronos/bin/python -u timeseries_with_chronos/experiment_files/main.py classify --head singular --mode seasonal --sites site_1 site_3 site_4
+
+
+# unlabeled train only (eval still labeled)
+#shell =  bash timeseries_with_chronos/chtc_scripts/unzip_data.sh && mkdir -p timeseries_with_chronos/results && /opt/conda/envs/chronos/bin/python -u timeseries_with_chronos/experiment_files/main.py classify --head singular --mode seasonal --no-labeled --sites site_1 site_2 site_3
+#shell =  bash timeseries_with_chronos/chtc_scripts/unzip_data.sh && mkdir -p timeseries_with_chronos/results && /opt/conda/envs/chronos/bin/python -u timeseries_with_chronos/experiment_files/main.py classify --head singular --mode seasonal --no-labeled --sites site_1 site_2 site_4
+#shell =  bash timeseries_with_chronos/chtc_scripts/unzip_data.sh && mkdir -p timeseries_with_chronos/results && /opt/conda/envs/chronos/bin/python -u timeseries_with_chronos/experiment_files/main.py classify --head singular --mode seasonal --no-labeled --sites site_2 site_3 site_4
+#shell =  bash timeseries_with_chronos/chtc_scripts/unzip_data.sh && mkdir -p timeseries_with_chronos/results && /opt/conda/envs/chronos/bin/python -u timeseries_with_chronos/experiment_files/main.py classify --head singular --mode seasonal --no-labeled --sites site_1 site_3 site_4
+
+
+
+container_image =  osdf:///chtc/staging/a/agoyal33/chronos4.sif 
 
 
 should_transfer_files = YES
-transfer_input_files = /home/agoyal33/timeseries_with_chronos, osdf:///chtc/staging/a/agoyal33/outcomes.parquet
+transfer_input_files = /home/agoyal33/timeseries_with_chronos, osdf:///chtc/staging/a/agoyal33/death_gap_results_updated.parquet 
 
 
 transfer_output_files = timeseries_with_chronos/results

@@ -47,12 +47,13 @@ from log_utils import tprint
 
 from constants import (
     BINNING_FINE_GRAINED,
+    DEATH_GAP_PATH,
     FINE_GRAINED_OUTPUT_SUFFIX,
     RESULTS_DIR,
     UNLABELED_BATCH_POSITIVE_RATIO,
     US_PER_SECOND,
 )
-from unlabelled.gap_labels import apply_gap_labels
+from unlabelled.gap_labels import apply_gap_labels, get_gap_sampler
 
 
 class EmbeddingDataset(Dataset):
@@ -188,6 +189,11 @@ class UniformClassBatchSampler(Sampler):
         return self.num_batches
 
 
+
+
+
+    
+    
 # Cap re-gaps on a short fill so a missing class cannot hang an epoch.
 _MAX_FILL_REGAPS = 32
 
@@ -205,6 +211,7 @@ class GapEpochLoader:
         threshold_us,
         batch_size,
         positive_ratio,
+        gap_sampler,
     ):
         self.emb = np.asarray(embedding_matrix, dtype=np.float32)
         self.realized = np.asarray(realized_labels, dtype=np.float64)
@@ -216,7 +223,7 @@ class GapEpochLoader:
         self.n = len(self.realized)
         self.num_batches = math.ceil(self.n / batch_size) if self.n else 0
         self.T = min(int(round(positive_ratio * batch_size)), batch_size)
-        self.rng = np.random.default_rng()
+        self.rng = gap_sampler
 
     def __len__(self):
         return self.num_batches
@@ -485,6 +492,72 @@ def _save_cumulative_loss_curve(fold_curve_data, output_dir, k):
 
     return {
         'train_path': train_path, 
+        'val_path': val_path
+    }
+
+
+def _save_cumulative_accuracy_curve(fold_curve_data, output_dir, k):
+    """Same layout as loss: per-fold faint + mean ± std. Y is accuracy at 0.5."""
+    train_by_fold = np.array([fd['train_accs'] for fd in fold_curve_data], dtype=float)
+    val_by_fold = np.array([fd['val_accs'] for fd in fold_curve_data], dtype=float)
+    val_epochs = np.asarray(fold_curve_data[0]['val_epochs'], dtype=int)
+
+    n_epochs = train_by_fold.shape[1]
+    for fd in fold_curve_data:
+        if len(fd['train_accs']) != n_epochs:
+            raise ValueError('All folds must have the same number of train accuracy points.')
+        if list(fd['val_epochs']) != list(val_epochs):
+            raise ValueError('All folds must use the same val epoch schedule.')
+
+    train_epochs = np.arange(1, n_epochs + 1)
+    mean_train = train_by_fold.mean(axis=0)
+    std_train = train_by_fold.std(axis=0)
+    mean_val = val_by_fold.mean(axis=0)
+    std_val = val_by_fold.std(axis=0)
+
+    n_folds = train_by_fold.shape[0]
+    cmap = plt.cm.tab10 if n_folds <= 10 else plt.cm.tab20
+    fold_colors = [cmap(i % cmap.N) for i in range(n_folds)]
+    fold_alpha = 0.65
+    mean_color = 'black'
+
+    def _legend_kwargs():
+        return {'fontsize': 8, 'ncol': 2, 'loc': 'upper right'}
+
+    # --- Train ---
+    plt.figure(figsize=(9, 5))
+    for i in range(n_folds):
+        plt.plot(train_epochs, train_by_fold[i], color=fold_colors[i], alpha=fold_alpha, linewidth=1.2, label=f'Fold {i + 1}')
+    plt.fill_between(train_epochs, mean_train - std_train, mean_train + std_train, color=mean_color, alpha=0.15, zorder=5)
+    plt.plot(train_epochs, mean_train, color=mean_color, linewidth=2.5, zorder=6, label='Mean ± std')
+    plt.xlabel('Epoch')
+    plt.ylabel('Accuracy')
+    plt.title(f'Cumulative train accuracy ({k}-fold CV)')
+    plt.legend(**_legend_kwargs())
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    train_path = os.path.join(output_dir, 'Accuracy curve train.png')
+    plt.savefig(train_path, dpi=150)
+    plt.close()
+
+    # --- Val (every 5 epochs) ---
+    plt.figure(figsize=(9, 5))
+    for i in range(n_folds):
+        plt.plot(val_epochs, val_by_fold[i], color=fold_colors[i], alpha=fold_alpha, linewidth=1.2, marker='o', markersize=3, label=f'Fold {i + 1}')
+    plt.fill_between(val_epochs, mean_val - std_val, mean_val + std_val, color=mean_color, alpha=0.15, zorder=5)
+    plt.plot(val_epochs, mean_val, color=mean_color, linewidth=2.5, marker='o', markersize=5, zorder=6, label='Mean ± std')
+    plt.xlabel('Epoch')
+    plt.ylabel('Accuracy')
+    plt.title(f'Cumulative val accuracy ({k}-fold CV, every 5 epochs)')
+    plt.legend(**_legend_kwargs())
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    val_path = os.path.join(output_dir, 'Accuracy curve val.png')
+    plt.savefig(val_path, dpi=150)
+    plt.close()
+
+    return {
+        'train_path': train_path,
         'val_path': val_path
     }
 
@@ -827,6 +900,10 @@ def k_fold_cv(
     dim = lab_mat.shape[1]
     un = _pack_unlabeled(unlabeled, dim) if has_unlab else None
     has_unlab = un is not None
+    gap_sampler = None
+    if has_unlab:
+        gap_sampler = get_gap_sampler()
+        tprint(f'Gap sampler: {DEATH_GAP_PATH}')
 
     if use_focal_loss and alpha is None:
         alpha = _focal_alpha(lab_y)
@@ -899,7 +976,7 @@ def k_fold_cv(
             realized, unknown, we, dt = gap_spec
             train_loader = GapEpochLoader(
                 train_mat, realized, unknown, we, dt,
-                threshold_us, batch_size, batch_positive_ratio,
+                threshold_us, batch_size, batch_positive_ratio, gap_sampler,
             )
             train_pos_rate = train_loader.first_pass_positive_rate()
 
@@ -910,14 +987,17 @@ def k_fold_cv(
         optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
         train_losses, val_losses, val_epochs = [], [], []
+        train_accs, val_accs = [], []
         train_interval_losses = []
 
         # Val loss is sampled every 5 epochs to keep the inner loop cheap.
         for epoch in range(1, epochs + 1):
             train_losses.append(_run_epoch( model, train_loader, device, optimizer, use_focal_loss, alpha, gamma, train_interval_losses))
+            train_accs.append(_evaluate(model, train_loader, device)['accuracy'])
             
             if epoch % 5 == 0:
                 val_losses.append(_run_epoch(model, val_loader, device, None, use_focal_loss, alpha, gamma))
+                val_accs.append(_evaluate(model, val_loader, device)['accuracy'])
                 val_epochs.append(epoch)
 
         # One full val pass after training (final epoch weights). Same labels/probs as metrics.
@@ -935,8 +1015,10 @@ def k_fold_cv(
 
         curve_data = {
             'train_losses': train_losses,
+            'train_accs': train_accs,
             'train_interval_losses': train_interval_losses,
             'val_losses': val_losses,
+            'val_accs': val_accs,
             'val_epochs': val_epochs,
             'pr_curve': pr_curve,
             'roc_curve': roc_curve_data,
@@ -979,12 +1061,15 @@ def k_fold_cv(
         cumulative_curves['pr'] = _save_cumulative_pr_added(fold_probabilities['y_true_folds'],fold_probabilities['y_score_folds'], output_dir, k)
         cumulative_curves['confusion_matrix'] = _save_cumulative_confusion_matrix(fold_probabilities['y_true_folds'], fold_probabilities['y_score_folds'], output_dir, cumulative_curves['pr']['threshold'])
         cumulative_curves['loss'] = _save_cumulative_loss_curve(fold_curve_data, output_dir, k)
+        cumulative_curves['accuracy'] = _save_cumulative_accuracy_curve(fold_curve_data, output_dir, k)
 
         tprint(f'\nSaved cumulative ROC: {cumulative_curves["roc"]["path"]}')
         tprint(f'Saved cumulative PR:  {cumulative_curves["pr"]["path"]}')
         tprint(f'Saved cumulative CM:  {cumulative_curves["confusion_matrix"]["path"]}')
         tprint(f'Saved cumulative loss (train): {cumulative_curves["loss"]["train_path"]}')
         tprint(f'Saved cumulative loss (val):   {cumulative_curves["loss"]["val_path"]}')
+        tprint(f'Saved cumulative acc (train):  {cumulative_curves["accuracy"]["train_path"]}')
+        tprint(f'Saved cumulative acc (val):    {cumulative_curves["accuracy"]["val_path"]}')
         tprint(f'Saved fold probs:     {fold_probabilities_path}')
 
     tprint(f"\n{'=' * 80}")
@@ -1005,7 +1090,7 @@ def train_and_save_results(
     gamma=2.0,
     loss_name='Focal Loss',
     k=5,
-    epochs=30,
+    epochs=10,
     batch_size=400,
     lr=0.0006,
     batch_positive_ratio=None,
